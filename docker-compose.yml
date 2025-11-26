@@ -1,0 +1,15 @@
+version: '3.9'
+
+services:
+  symnote:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: symnote-dev
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app           # Why not: ホストのコード修正がそのまま反映されるため
+    environment:
+      - PYTHONUNBUFFERED=1
+    tty: true
