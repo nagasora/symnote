@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any, List, Mapping, Sequence, Dict
 
-import openai
-
+import google.generativeai as genai
+import json
 from symnote.config import load_config
 
 
@@ -196,9 +196,11 @@ def suggest_today_tasks(
 
 
 def summarize_and_extract_tasks_from_text(text: str) -> Dict[str, Any]:
-    """Use OpenAI to summarize and extract tasks from text."""
+    """Use Gemini to summarize and extract tasks from text."""
     config = load_config()
-    client = openai.OpenAI(api_key=config.openai_api_key)
+    genai.configure(api_key=config.llm_api_key)
+    generation_config = genai.GenerationConfig(max_output_tokens=config.max_tokens)
+    model = genai.GenerativeModel(config.llm_model, generation_config=generation_config)
 
     prompt = f"""
     以下のテキストを日本語で要約し、関連するタスクを抽出してください。
@@ -206,7 +208,7 @@ def summarize_and_extract_tasks_from_text(text: str) -> Dict[str, Any]:
     テキスト:
     {text}
 
-    出力は以下のフォーマットでお願いします。
+    出力は必ず以下のJSONフォーマットでお願いします。
     {{
         "summary": "ここに要約を記述",
         "tasks": [
@@ -218,16 +220,52 @@ def summarize_and_extract_tasks_from_text(text: str) -> Dict[str, Any]:
     """
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-        )
-        result = response.choices[0].message.content
-        import json
-        return json.loads(result)
+        response = model.generate_content(prompt)
+        
+        # Extract the json string from the response
+        # It might be enclosed in ```json ... ```
+        content = response.text
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        
+        return json.loads(content)
 
     except Exception as e:
-        print(f"Error calling OpenAI API: {e}")
+        print(f"Error calling Gemini API: {e}")
         return {"summary": "", "tasks": []}
 
+
+def generate_todos_from_idea(idea_text: str) -> List[str]:
+    """Generate a list of actionable ToDos from an idea using Gemini."""
+    config = load_config()
+    genai.configure(api_key=config.llm_api_key)
+    generation_config = genai.GenerationConfig(max_output_tokens=config.max_tokens)
+    model = genai.GenerativeModel(config.llm_model, generation_config=generation_config)
+
+    prompt = f"""
+    以下のアイデアや実現したいことから、具体的なアクション可能なToDoリスト（タスクリスト）を生成してください。
+    
+    アイデア/目標:
+    {idea_text}
+    
+    出力は以下のJSONフォーマットのみでお願いします。
+    {{
+        "todos": [
+            "具体的なタスク1",
+            "具体的なタスク2",
+            ...
+        ]
+    }}
+    """
+
+    try:
+        response = model.generate_content(prompt)
+        content = response.text
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        
+        data = json.loads(content)
+        return data.get("todos", [])
+    except Exception as e:
+        print(f"Error generating todos: {e}")
+        return []
