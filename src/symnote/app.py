@@ -7,13 +7,13 @@ import streamlit as st
 
 from symnote.core.db import (
     ClassificationSummary,
+    classify_inbox_items,
     fetch_inbox,
     fetch_tasks,
     init_db,
     insert_memo,
-    classify_inbox_items,
+    insert_task,
     update_item_fields,
-    insert_weekly_review,
 )
 from symnote.core.nlp import (
     classify_text_rule_based,
@@ -21,9 +21,9 @@ from symnote.core.nlp import (
     Effort,
     Energy,
     suggest_today_tasks,
+    generate_todos_from_idea,
     summarize_and_extract_tasks_from_text,
 )
-from symnote.core.weekly_review import generate_weekly_review
 from symnote.calendar_app import render_calendar_tab
 from symnote.core.doc_loader import extract_text_from_pdf
 
@@ -45,20 +45,63 @@ def _due_priority_tuple(task: Dict) -> Tuple[dt.date, float, int]:
 
 def render_inbox_tab() -> None:
     st.subheader("📝 インボックスに追加")
-    with st.form("inbox_form"):
+    with st.form("inbox_form", clear_on_submit=True):
         raw_text = st.text_area(
             "頭の中にあることをなんでも書き込んでください",
             height=150,
             placeholder="例: 来週のゼミ発表の準備… / 論文Xを読む / バイトのシフト調整...",
         )
+        
+        # 期限の選択
+        st.markdown("**期限**")
+        col_due_1, col_due_2 = st.columns([1, 1])
+        with col_due_1:
+            due_option = st.radio(
+                "期限プリセット", 
+                ["今日", "明日", "カレンダーから選択"], 
+                horizontal=True,
+                label_visibility="collapsed"
+            )
+        with col_due_2:
+            custom_date = st.date_input(
+                "日付を指定", 
+                value=dt.date.today(), 
+                label_visibility="collapsed"
+            )
+
         tags = st.text_input("タグ（カンマ区切り・任意）", "")
-        submitted = st.form_submit_button("インボックスに保存")
-        if submitted:
+        
+        col_sub1, col_sub2 = st.columns(2)
+        with col_sub1:
+            submitted_memo = st.form_submit_button("メモとして保存", type="secondary")
+        with col_sub2:
+            submitted_task = st.form_submit_button("タスクとして保存", type="primary")
+        
+        # 期限の決定
+        due_date_str = None
+        today = dt.date.today()
+        if due_option == "今日":
+            due_date_str = today.isoformat()
+        elif due_option == "明日":
+            due_date_str = (today + dt.timedelta(days=1)).isoformat()
+        elif due_option == "カレンダーから選択":
+            due_date_str = custom_date.isoformat()
+
+        if submitted_memo:
             if not raw_text.strip():
                 st.warning("メモ本文を入力してください。")
             else:
-                note_id = insert_memo(raw_text=raw_text, tags=tags)
-                st.success(f"保存しました (ID: {note_id})")
+                note_id = insert_memo(raw_text=raw_text, tags=tags, date_str=due_date_str)
+                st.success(f"メモを保存しました (ID: {note_id})")
+
+        if submitted_task:
+            if not raw_text.strip():
+                st.warning("タスク本文を入力してください。")
+            else:
+                # タスクとして保存 (insert_taskを使用)
+                # insert_taskは date_str を受け取るが、これは実行日/期限として扱われることが多い
+                note_id = insert_task(raw_text=raw_text, tags=tags, date_str=due_date_str)
+                st.success(f"タスクを保存しました (ID: {note_id})")
 
     if st.button("AI でインボックスを整理", type="primary"):
         summary: ClassificationSummary = classify_inbox_items(classify_text_rule_based)
@@ -136,10 +179,27 @@ def render_task_organizer_tab() -> None:
         st.info("AI でメモをタスクに分類するとここに表示されます。")
         return
 
-    sorted_tasks = sorted(tasks, key=_due_priority_tuple)
-    for task in sorted_tasks:
-        with st.expander(f"[{task.get('status', 'inbox')}] {task.get('raw_text', '')[:40]}..."):
-            render_task_editor(task)
+    # Group by date
+    tasks_by_date: Dict[str, List[Dict]] = {}
+    for task in tasks:
+        d = task.get("date") or "期限なし"
+        if d not in tasks_by_date:
+            tasks_by_date[d] = []
+        tasks_by_date[d].append(task)
+    
+    # Sort dates (Newest first, "期限なし" at end or beginning? User said "最新の日付が来て、下になるほど古くなる")
+    # Assuming ISO format strings, reverse sort works. "期限なし" will be at the end if we handle it carefully.
+    sorted_dates = sorted([d for d in tasks_by_date.keys() if d != "期限なし"], reverse=True)
+    if "期限なし" in tasks_by_date:
+        sorted_dates.append("期限なし")
+
+    for d in sorted_dates:
+        st.markdown(f"### {d}")
+        date_tasks = tasks_by_date[d]
+        sorted_tasks = sorted(date_tasks, key=_due_priority_tuple)
+        for task in sorted_tasks:
+            with st.expander(f"[{task.get('status', 'inbox')}] {task.get('raw_text', '')[:40]}..."):
+                render_task_editor(task)
 
 
 def _display_tasks(tasks: List[Dict], title: str) -> None:
@@ -148,14 +208,33 @@ def _display_tasks(tasks: List[Dict], title: str) -> None:
         st.info("該当タスクはありません。")
         return
     sorted_tasks = sorted(tasks, key=_due_priority_tuple)
+    today = dt.date.today()
+    
     for idx, task in enumerate(sorted_tasks, start=1):
-        st.markdown(f"**{idx}.** {task.get('raw_text', '')}")
-        due = task.get("date") or "-"
+        # Overdue check
+        due_str = task.get("date")
+        is_overdue = False
+        if due_str:
+            try:
+                due_date = dt.date.fromisoformat(due_str)
+                if due_date < today:
+                    is_overdue = True
+            except ValueError:
+                pass
+        
+        prefix = "🚨 " if is_overdue else ""
+        st.markdown(f"**{idx}.** {prefix}{task.get('raw_text', '')}")
+        
+        due = due_str or "-"
         meta = (
             f"期限: {due} / "
             f"優先度: importance {task.get('importance') or '-'} × urgency {task.get('urgency') or '-'}"
         )
-        st.caption(meta)
+        if is_overdue:
+            st.caption(f":red[{meta}]")
+        else:
+            st.caption(meta)
+            
         btn_col1, btn_col2 = st.columns([1, 3])
         with btn_col1:
             if st.button("✔ 完了", key=f"done_btn_{task['id']}"):
@@ -196,31 +275,39 @@ def render_today_tab() -> None:
         _display_tasks(others, "その他の今日タスク")
 
 
-def render_week_tab() -> None:
-    tasks = fetch_tasks(statuses=["week"], limit=200)
-    ordered = sorted(tasks, key=_due_priority_tuple)
-    _display_tasks(ordered, "🌤 今週のタスク")
+def render_idea_tab() -> None:
+    st.subheader("💡 アイデア整理")
+    st.caption("実現したいことやアイデアを入力すると、AIがToDoリストを生成します。")
+    
+    idea_text = st.text_area("アイデア・実現したいこと", height=150)
+    
+    if st.button("ToDoを生成する", type="primary"):
+        if not idea_text.strip():
+            st.warning("アイデアを入力してください。")
+            return
+            
+        with st.spinner("AIが考え中..."):
+            todos = generate_todos_from_idea(idea_text)
+            
+        if not todos:
+            st.error("ToDoの生成に失敗しました。")
+            return
+            
+        st.session_state["generated_todos"] = todos
+        st.success("ToDoが生成されました！")
 
-    st.subheader("📘 AI 週次振り返り")
-    payload = generate_weekly_review()
-    st.write(f"期間: {payload.period_start} - {payload.period_end}")
-    st.write(payload.summary)
-    cols = st.columns(3)
-    with cols[0]:
-        st.markdown("**👍 良かった点**")
-        for point in payload.good_points:
-            st.write(f"- {point}")
-    with cols[1]:
-        st.markdown("**🧠 学び・改善点**")
-        for point in payload.learnings:
-            st.write(f"- {point}")
-    with cols[2]:
-        st.markdown("**🎯 来週のフォーカス**")
-        for point in payload.focus_next:
-            st.write(f"- {point}")
-    if st.button("AI レポートを保存する"):
-        review_id = insert_weekly_review(payload)
-        st.success(f"週次レポート (ID: {review_id}) を保存しました。")
+    if "generated_todos" in st.session_state:
+        st.subheader("生成されたToDo")
+        todos = st.session_state["generated_todos"]
+        
+        for i, todo in enumerate(todos):
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.write(f"- {todo}")
+            with col2:
+                if st.button("追加", key=f"add_todo_{i}"):
+                    insert_memo(raw_text=todo, tags="from_idea")
+                    st.toast(f"「{todo[:20]}...」を追加しました")
 
 
 def render_doc_analysis_tab() -> None:
@@ -263,8 +350,8 @@ def main() -> None:
     st.title("SymNote 🧠")
     st.caption("思考インボックスとタスク優先づけのための入り口")
 
-    tabs = ["インボックス", "タスク整理", "今日ビュー", "今週ビュー", "カレンダー", "ドキュメント分析"]
-    tab_inbox, tab_tasks, tab_today, tab_week, tab_calendar, tab_doc_analysis = st.tabs(tabs)
+    tabs = ["インボックス", "タスク整理", "今日ビュー", "カレンダー", "アイデア整理", "ドキュメント分析"]
+    tab_inbox, tab_tasks, tab_today, tab_calendar, tab_idea, tab_doc_analysis = st.tabs(tabs)
 
     with tab_inbox:
         render_inbox_tab()
@@ -272,14 +359,13 @@ def main() -> None:
         render_task_organizer_tab()
     with tab_today:
         render_today_tab()
-    with tab_week:
-        render_week_tab()
     with tab_calendar:
         render_calendar_tab()
+    with tab_idea:
+        render_idea_tab()
     with tab_doc_analysis:
         render_doc_analysis_tab()
 
 
 if __name__ == "__main__":
     main()
-

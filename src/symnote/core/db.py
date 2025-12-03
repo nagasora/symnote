@@ -24,6 +24,15 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
+def _migrate_db(conn: sqlite3.Connection) -> None:
+    """必要なカラムが足りない場合に ALTER TABLE で追加する簡易マイグレーション。"""
+    cur = conn.execute("PRAGMA table_info(items)")
+    columns = {row["name"] for row in cur.fetchall()}
+
+    if "due_date" not in columns:
+        conn.execute("ALTER TABLE items ADD COLUMN due_date TEXT")
+
+
 def init_db() -> None:
     """items テーブルを用意する（存在しなければ作成）。"""
     conn = get_connection()
@@ -34,6 +43,7 @@ def init_db() -> None:
               id INTEGER PRIMARY KEY,
               created_at TEXT,
               date TEXT,
+              due_date TEXT,
               kind TEXT,              -- 'memo' | 'task' | 'weekly_review'
               raw_text TEXT,
               ai_category TEXT,       -- 'task' | 'idea' | 'someday'
@@ -47,13 +57,27 @@ def init_db() -> None:
             );
             """
         )
+        _migrate_db(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_date ON items(date);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_items_due_date ON items(due_date);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_kind ON items(kind);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);")
 
 
-def insert_memo(raw_text: str, date_str: Optional[str] = None, tags: str = "") -> int:
-    """インボックス用のメモを登録する。"""
+def insert_item(
+    kind: str,
+    raw_text: str,
+    date_str: Optional[str] = None,
+    tags: str = "",
+    due_date: Optional[str] = None,
+    status: str = "inbox",
+    ai_category: Optional[str] = None,
+    importance: Optional[int] = None,
+    urgency: Optional[int] = None,
+    effort: Optional[str] = None,
+    energy: Optional[str] = None,
+) -> int:
+    """汎用的なアイテム登録。"""
     if not date_str:
         date_str = dt.date.today().isoformat()
     now = dt.datetime.now().isoformat(timespec="seconds")
@@ -63,16 +87,70 @@ def insert_memo(raw_text: str, date_str: Optional[str] = None, tags: str = "") -
         cur = conn.execute(
             """
             INSERT INTO items (
-              created_at, date, kind, raw_text,
+              created_at, date, due_date, kind, raw_text,
               ai_category, importance, urgency, effort, energy,
               status, tags, embedding
             )
-            VALUES (?, ?, 'memo', ?, NULL, NULL, NULL, NULL, NULL,
-                    'inbox', ?, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
-            (now, date_str, raw_text, tags),
+            (
+                now,
+                date_str,
+                due_date,
+                kind,
+                raw_text,
+                ai_category,
+                importance,
+                urgency,
+                effort,
+                energy,
+                status,
+                tags,
+            ),
         )
         return int(cur.lastrowid)
+
+
+def insert_memo(raw_text: str, date_str: Optional[str] = None, tags: str = "", due_date: Optional[str] = None) -> int:
+    """インボックス用のメモを登録する。"""
+    return insert_item(kind="memo", raw_text=raw_text, date_str=date_str, tags=tags, due_date=due_date)
+
+
+def insert_task(
+    raw_text: str,
+    date_str: Optional[str] = None,
+    tags: str = "",
+    due_date: Optional[str] = None,
+    status: str = "inbox",
+) -> int:
+    """タスクを直接登録する。"""
+    return insert_item(
+        kind="task",
+        raw_text=raw_text,
+        date_str=date_str,
+        tags=tags,
+        due_date=due_date,
+        status=status,
+        ai_category="task",
+        importance=3,
+        urgency=3,
+    )
+
+def insert_standalone_memo(
+    raw_text: str,
+    date_str: Optional[str] = None,
+    tags: str = "",
+) -> int:
+    """メモを直接登録する。"""
+    return insert_item(
+        kind="memo",
+        raw_text=raw_text,
+        date_str=date_str,
+        tags=tags,
+        status="inbox",
+        ai_category="memo",
+    )
+
 
 
 def fetch_inbox(limit: int = 50) -> List[ItemRow]:
@@ -98,7 +176,7 @@ def fetch_tasks(
     """タスク(kind='task')を取得。status でフィルタ可能。"""
     conn = get_connection()
     query = [
-        "SELECT id, created_at, date, raw_text, tags, ai_category,",
+        "SELECT id, created_at, date, due_date, raw_text, tags, ai_category,",
         "importance, urgency, effort, energy, status",
         "FROM items WHERE kind = 'task'",
     ]
@@ -119,9 +197,24 @@ def fetch_items_by_date(date_str: str) -> List[ItemRow]:
     conn = get_connection()
     cur = conn.execute(
         """
-        SELECT id, kind, status, raw_text, tags, importance, urgency, effort, energy, ai_category
+        SELECT id, kind, status, raw_text, tags, importance, urgency, effort, energy, ai_category, due_date, date
         FROM items
         WHERE date = ?
+        ORDER BY created_at DESC
+        """,
+        (date_str,),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def fetch_tasks_due_on(date_str: str) -> List[ItemRow]:
+    """指定日を期限とするタスクを取得。"""
+    conn = get_connection()
+    cur = conn.execute(
+        """
+        SELECT id, kind, status, raw_text, tags, importance, urgency, effort, energy, ai_category, due_date, date
+        FROM items
+        WHERE due_date = ? AND kind = 'task'
         ORDER BY created_at DESC
         """,
         (date_str,),
@@ -145,6 +238,24 @@ def fetch_counts_by_date(start_date: str, end_date: str) -> List[Tuple[str, int,
         (start_date, end_date),
     )
     return [(r["date"], r["task_count"], r["memo_count"]) for r in cur.fetchall()]
+
+
+def fetch_due_date_counts_by_date(start_date: str, end_date: str) -> List[Tuple[str, int]]:
+    """期間内の日付ごとの期限タスク数を集計。"""
+    conn = get_connection()
+    cur = conn.execute(
+        """
+        SELECT due_date, COUNT(id) AS due_task_count
+        FROM items
+        WHERE due_date BETWEEN ? AND ?
+          AND kind = 'task'
+        GROUP BY due_date
+        ORDER BY due_date
+        """,
+        (start_date, end_date),
+    )
+    return [(r["due_date"], r["due_task_count"]) for r in cur.fetchall()]
+
 
 
 def insert_weekly_review(payload: "WeeklyReviewPayload") -> int:
@@ -183,6 +294,7 @@ def update_item_fields(item_id: int, **fields: Any) -> None:
         "kind",
         "raw_text",
         "date",
+        "due_date",
     }
     updates: List[str] = []
     params: List[Any] = []
