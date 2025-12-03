@@ -141,30 +141,55 @@ def render_calendar_tab() -> None:
     tasks = [i for i in all_items if i.get("kind") == "task"]
     memos = [i for i in all_items if i.get("kind") == "memo"]
 
-    if tasks:
-        st.write("#### タスク")
-        for t in tasks:
-            is_due = t.get("due_date") == target_date_str
-            is_created = t.get("date") == target_date_str
-            label = ""
-            if is_due and is_created:
-                label = " (作成 & 期限)"
-            elif is_due:
-                label = " (期限)"
-            elif is_created:
-                label = " (作成)"
+    uncompleted_tasks = [t for t in tasks if t.get("status") != "done"]
+    completed_tasks = [t for t in tasks if t.get("status") == "done"]
 
-            with st.expander(f"[{t.get('status', '')}] {t.get('raw_text', '')[:40]}...{label}"):
-                st.write(t.get("raw_text", ""))
-                st.caption(f"優先度: {t.get('importance')} × {t.get('urgency')} / effort {t.get('effort')} / energy {t.get('energy')}")
-                if st.button("✔ 完了", key=f"done_calendar_{t['id']}"):
-                    update_item_fields(t["id"], status="done")
-                    st.success("完了に更新しました。")
-                    st.rerun()
+    tab_uncompleted, tab_completed, tab_memos = st.tabs(["未完了タスク", "完了済みタスク", "メモ"])
 
-    if memos:
-        st.write("#### メモ")
-        for m in memos:
-            with st.expander(f"メモ ID {m['id']}"):
-                st.write(m.get("raw_text", ""))
-                st.caption(f"タグ: {m.get('tags') or '-'}")
+    with tab_uncompleted:
+        if not uncompleted_tasks:
+            st.info("未完了タスクはありません。")
+        else:
+            for t in uncompleted_tasks:
+                is_due = t.get("due_date") == target_date_str
+                is_created = t.get("date") == target_date_str
+                label = ""
+                if is_due and is_created:
+                    label = " (作成 & 期限)"
+                elif is_due:
+                    label = " (期限)"
+                elif is_created:
+                    label = " (作成)"
+
+                display_title = t.get("tags") or t.get("raw_text", "")[:20]
+                with st.expander(f"[{t.get('status', '')}] {display_title}{label}"):
+                    st.write(t.get("raw_text", ""))
+                    st.caption(f"優先度: {t.get('importance')} × {t.get('urgency')} / effort {t.get('effort')} / energy {t.get('energy')}")
+                    if st.button("✔ 完了", key=f"done_calendar_{t['id']}"):
+                        update_item_fields(t["id"], status="done")
+                        st.success("完了に更新しました。")
+                        st.rerun()
+
+    with tab_completed:
+        if not completed_tasks:
+            st.info("完了済みタスクはありません。")
+        else:
+            for t in completed_tasks:
+                display_title = t.get("tags") or t.get("raw_text", "")[:20]
+                with st.expander(f"✅ {display_title}"):
+                    st.write(t.get("raw_text", ""))
+                    st.caption(f"完了済み (ID: {t['id']})")
+                    if st.button("未完了に戻す", key=f"revert_calendar_{t['id']}"):
+                        update_item_fields(t["id"], status="inbox")
+                        st.success("未完了に戻しました。")
+                        st.rerun()
+
+    with tab_memos:
+        if not memos:
+            st.info("メモはありません。")
+        else:
+            for m in memos:
+                display_title = m.get("tags") or m.get("raw_text", "")[:20]
+                with st.expander(f"メモ: {display_title}"):
+                    st.write(m.get("raw_text", ""))
+                    st.caption(f"タグ: {m.get('tags') or '-'}")

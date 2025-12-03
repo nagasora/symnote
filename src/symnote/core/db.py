@@ -57,11 +57,27 @@ def init_db() -> None:
             );
             """
         )
-        _migrate_db(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_date ON items(date);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_due_date ON items(due_date);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_kind ON items(kind);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);")
+
+        # idea_sessions table
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS idea_sessions (
+                id INTEGER PRIMARY KEY,
+                title TEXT,
+                summary TEXT,
+                source_text TEXT,
+                chat_history TEXT, -- JSON string
+                created_at TEXT,
+                updated_at TEXT
+            );
+            """
+        )
+        
+        _migrate_db(conn)
 
 
 def insert_item(
@@ -152,6 +168,12 @@ def insert_standalone_memo(
     )
 
 
+def delete_item(item_id: int) -> None:
+    """アイテムを削除する。"""
+    conn = get_connection()
+    with conn:
+        conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
+
 
 def fetch_inbox(limit: int = 50) -> List[ItemRow]:
     """status='inbox' のメモや未処理タスクを新しい順に取得。"""
@@ -222,13 +244,40 @@ def fetch_tasks_due_on(date_str: str) -> List[ItemRow]:
     return [dict(r) for r in cur.fetchall()]
 
 
+def fetch_tasks_for_today_view(today_str: str) -> List[ItemRow]:
+    """
+    今日ビューに表示すべきタスクを取得する。
+    条件:
+    1. kind = 'task'
+    2. status != 'done'
+    3. (status = 'today') OR (date <= today_str)
+    """
+    conn = get_connection()
+    cur = conn.execute(
+        """
+        SELECT id, created_at, date, due_date, raw_text, tags, ai_category,
+               importance, urgency, effort, energy, status
+        FROM items
+        WHERE kind = 'task'
+          AND status != 'done'
+          AND (status = 'today' OR date <= ?)
+        ORDER BY 
+            CASE WHEN status = 'today' THEN 0 ELSE 1 END,
+            date ASC,
+            importance DESC
+        """,
+        (today_str,),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
 def fetch_counts_by_date(start_date: str, end_date: str) -> List[Tuple[str, int, int]]:
     """期間内の日付ごとのタスク数/メモ数を集計。"""
     conn = get_connection()
     cur = conn.execute(
         """
         SELECT date,
-               SUM(CASE WHEN kind = 'task' THEN 1 ELSE 0 END) AS task_count,
+               SUM(CASE WHEN kind = 'task' AND status != 'done' THEN 1 ELSE 0 END) AS task_count,
                SUM(CASE WHEN kind = 'memo' THEN 1 ELSE 0 END) AS memo_count
         FROM items
         WHERE date BETWEEN ? AND ?
@@ -249,6 +298,7 @@ def fetch_due_date_counts_by_date(start_date: str, end_date: str) -> List[Tuple[
         FROM items
         WHERE due_date BETWEEN ? AND ?
           AND kind = 'task'
+          AND status != 'done'
         GROUP BY due_date
         ORDER BY due_date
         """,
@@ -412,3 +462,68 @@ def fetch_weekly_review_sources(
     )
     return {"tasks": [dict(r) for r in tasks_cur.fetchall()],
             "memos": [dict(r) for r in memos_cur.fetchall()]}
+
+
+def create_idea_session(title: str, summary: str, source_text: str, chat_history: str = "[]") -> int:
+    """新しいアイデアセッションを作成する。"""
+    conn = get_connection()
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    with conn:
+        cur = conn.execute(
+            """
+            INSERT INTO idea_sessions (title, summary, source_text, chat_history, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (title, summary, source_text, chat_history, now, now),
+        )
+        return cur.lastrowid
+
+
+def update_idea_session_chat(session_id: int, chat_history: str) -> None:
+    """アイデアセッションのチャット履歴を更新する。"""
+    conn = get_connection()
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    with conn:
+        conn.execute(
+            """
+            UPDATE idea_sessions
+            SET chat_history = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (chat_history, now, session_id),
+        )
+
+
+def fetch_idea_sessions() -> List[ItemRow]:
+    """アイデアセッション一覧を取得する（更新日時順）。"""
+    conn = get_connection()
+    cur = conn.execute(
+        """
+        SELECT id, title, summary, updated_at
+        FROM idea_sessions
+        ORDER BY updated_at DESC
+        """
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def get_idea_session(session_id: int) -> Optional[ItemRow]:
+    """指定されたIDのアイデアセッションを取得する。"""
+    conn = get_connection()
+    cur = conn.execute(
+        """
+        SELECT *
+        FROM idea_sessions
+        WHERE id = ?
+        """,
+        (session_id,),
+    )
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def delete_idea_session(session_id: int) -> None:
+    """アイデアセッションを削除する。"""
+    conn = get_connection()
+    with conn:
+        conn.execute("DELETE FROM idea_sessions WHERE id = ?", (session_id,))

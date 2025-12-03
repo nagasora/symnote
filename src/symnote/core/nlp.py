@@ -269,3 +269,77 @@ def generate_todos_from_idea(idea_text: str) -> List[str]:
     except Exception as e:
         print(f"Error generating todos: {e}")
         return []
+def analyze_source_and_generate_title(text: str) -> Dict[str, Any]:
+    """Analyze source text to generate a title, summary, and initial ideas."""
+    config = load_config()
+    genai.configure(api_key=config.llm_api_key)
+    generation_config = genai.GenerationConfig(max_output_tokens=config.max_tokens)
+    model = genai.GenerativeModel(config.llm_model, generation_config=generation_config)
+
+    prompt = f"""
+    以下のテキストを分析し、プロジェクトやテーマを表す短い「タイトル」、要約、そしてそこから考えられる「アイデア/タスク」のリストを生成してください。
+    アイデアは**厳選して3つだけ**提案してください。
+    
+    テキスト:
+    {text[:10000]}  # Limit context window if needed
+
+    出力は以下のJSONフォーマットのみでお願いします。
+    {{
+        "title": "短いタイトル（例: 新規アプリ開発、旅行計画）",
+        "summary": "要約",
+        "initial_ideas": [
+            "アイデア1",
+            "アイデア2",
+            ...
+        ]
+    }}
+    """
+
+    try:
+        response = model.generate_content(prompt)
+        content = response.text
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        return json.loads(content)
+    except Exception as e:
+        print(f"Error analyzing source: {e}")
+        return {"title": "無題のプロジェクト", "summary": "エラーが発生しました", "initial_ideas": []}
+
+
+def brainstorm_ideas(context: str, user_query: str) -> List[str]:
+    """Brainstorm more ideas based on context and user query."""
+    config = load_config()
+    genai.configure(api_key=config.llm_api_key)
+    generation_config = genai.GenerationConfig(max_output_tokens=config.max_tokens)
+    model = genai.GenerativeModel(config.llm_model, generation_config=generation_config)
+
+    prompt = f"""
+    以下のコンテキスト（背景情報）を踏まえて、ユーザーの要望に応じた具体的なアイデアやタスクをリストアップしてください。
+    アイデアは**厳選して3つだけ**提案してください。
+    
+    コンテキスト:
+    {context[:10000]}
+    
+    ユーザーの要望:
+    {user_query}
+    
+    出力は以下のJSONフォーマットのみでお願いします。
+    {{
+        "ideas": [
+            "アイデア1",
+            "アイデア2",
+            ...
+        ]
+    }}
+    """
+
+    try:
+        response = model.generate_content(prompt)
+        content = response.text
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        data = json.loads(content)
+        return data.get("ideas", [])
+    except Exception as e:
+        print(f"Error brainstorming: {e}")
+        return []
