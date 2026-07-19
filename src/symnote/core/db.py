@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
+from contextlib import contextmanager
 import datetime as dt
 import sqlite3
 
@@ -13,30 +14,61 @@ if TYPE_CHECKING:
     from symnote.core.weekly_review import WeeklyReviewPayload
 
 ItemRow = Dict[str, Any]
+SQLITE_BUSY_TIMEOUT_MS = 5_000
+
+
+@contextmanager
+def connection() -> Any:
+    """Yield a configured SQLite connection and close it reliably afterwards."""
+    conn = get_connection()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def get_connection() -> sqlite3.Connection:
     """SQLite のコネクションを取得する。存在しない場合はパスを作成。"""
     config = load_config()
-    Path(config.db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(config.db_path)
+    if config.db_path != ":memory:" and not config.db_path.startswith("file:"):
+        Path(config.db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(config.db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 
 def _migrate_db(conn: sqlite3.Connection) -> None:
     """必要なカラムが足りない場合に ALTER TABLE で追加する簡易マイグレーション。"""
-    cur = conn.execute("PRAGMA table_info(items)")
-    columns = {row["name"] for row in cur.fetchall()}
+    current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if current > 3:
+        raise RuntimeError("This database requires a newer version of SymNote.")
 
-    if "due_date" not in columns:
-        conn.execute("ALTER TABLE items ADD COLUMN due_date TEXT")
+    if current < 1:
+        # Version 1 is the original base schema already created by init_db.
+        conn.execute("PRAGMA user_version = 1")
+        current = 1
+    if current < 2:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
+        if "due_date" not in columns:
+            conn.execute("ALTER TABLE items ADD COLUMN due_date TEXT")
+        # Legacy task ``date`` represented its intended date. Preserve that
+        # interpretation while retaining date as the historical creation date.
+        conn.execute(
+            "UPDATE items SET due_date = date WHERE kind = 'task' AND due_date IS NULL"
+        )
+        conn.execute("PRAGMA user_version = 2")
+        current = 2
+    if current < 3:
+        # Indexes are created below after all current-version tables exist.
+        conn.execute("PRAGMA user_version = 3")
 
 
 def init_db() -> None:
     """items テーブルを用意する（存在しなければ作成）。"""
-    conn = get_connection()
-    with conn:
+    with connection() as conn, conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS items (
@@ -57,6 +89,7 @@ def init_db() -> None:
             );
             """
         )
+        _migrate_db(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_date ON items(date);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_due_date ON items(due_date);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_kind ON items(kind);")
@@ -76,8 +109,28 @@ def init_db() -> None:
             );
             """
         )
+
+        # mindmap_nodes table
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mindmap_nodes (
+              id INTEGER PRIMARY KEY,
+              project_id INTEGER NOT NULL,    -- 1 mindmap = 1 project (usually root node id or session id)
+              parent_id INTEGER,              -- NULL = root
+              kind TEXT NOT NULL,             -- 'root' | 'idea' | 'task' | 'detail' | 'note' | 'link'
+              title TEXT NOT NULL,
+              body TEXT,
+              order_index INTEGER DEFAULT 0,
+              depth INTEGER DEFAULT 0,
+              linked_item_id INTEGER,         -- items.id external reference
+              created_at TEXT,
+              updated_at TEXT
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mindmap_project ON mindmap_nodes(project_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mindmap_parent ON mindmap_nodes(parent_id);")
         
-        _migrate_db(conn)
 
 
 def insert_item(
@@ -98,8 +151,7 @@ def insert_item(
         date_str = dt.date.today().isoformat()
     now = dt.datetime.now().isoformat(timespec="seconds")
 
-    conn = get_connection()
-    with conn:
+    with connection() as conn, conn:
         cur = conn.execute(
             """
             INSERT INTO items (
@@ -170,25 +222,24 @@ def insert_standalone_memo(
 
 def delete_item(item_id: int) -> None:
     """アイテムを削除する。"""
-    conn = get_connection()
-    with conn:
+    with connection() as conn, conn:
         conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
 
 
 def fetch_inbox(limit: int = 50) -> List[ItemRow]:
     """status='inbox' のメモや未処理タスクを新しい順に取得。"""
-    conn = get_connection()
-    cur = conn.execute(
-        """
-        SELECT id, created_at, date, raw_text, tags, ai_category
-        FROM items
-        WHERE status = 'inbox'
-        ORDER BY created_at DESC
-        LIMIT ?
-        """,
-        (limit,),
-    )
-    return [dict(r) for r in cur.fetchall()]
+    with connection() as conn:
+        cur = conn.execute(
+            """
+            SELECT id, created_at, date, raw_text, tags, ai_category
+            FROM items
+            WHERE status = 'inbox'
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 
 def fetch_tasks(
@@ -196,7 +247,6 @@ def fetch_tasks(
     limit: int = 200,
 ) -> List[ItemRow]:
     """タスク(kind='task')を取得。status でフィルタ可能。"""
-    conn = get_connection()
     query = [
         "SELECT id, created_at, date, due_date, raw_text, tags, ai_category,",
         "importance, urgency, effort, energy, status",
@@ -210,14 +260,15 @@ def fetch_tasks(
     query.append("ORDER BY created_at DESC LIMIT ?")
     params.append(limit)
 
-    cur = conn.execute(" ".join(query), params)
-    return [dict(r) for r in cur.fetchall()]
+    with connection() as conn:
+        cur = conn.execute(" ".join(query), params)
+        return [dict(r) for r in cur.fetchall()]
 
 
 def fetch_items_by_date(date_str: str) -> List[ItemRow]:
     """指定日の items を kind/status など含めて取得。"""
-    conn = get_connection()
-    cur = conn.execute(
+    with connection() as conn:
+        cur = conn.execute(
         """
         SELECT id, kind, status, raw_text, tags, importance, urgency, effort, energy, ai_category, due_date, date
         FROM items
@@ -225,14 +276,14 @@ def fetch_items_by_date(date_str: str) -> List[ItemRow]:
         ORDER BY created_at DESC
         """,
         (date_str,),
-    )
-    return [dict(r) for r in cur.fetchall()]
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 
 def fetch_tasks_due_on(date_str: str) -> List[ItemRow]:
     """指定日を期限とするタスクを取得。"""
-    conn = get_connection()
-    cur = conn.execute(
+    with connection() as conn:
+        cur = conn.execute(
         """
         SELECT id, kind, status, raw_text, tags, importance, urgency, effort, energy, ai_category, due_date, date
         FROM items
@@ -240,8 +291,8 @@ def fetch_tasks_due_on(date_str: str) -> List[ItemRow]:
         ORDER BY created_at DESC
         """,
         (date_str,),
-    )
-    return [dict(r) for r in cur.fetchall()]
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 
 def fetch_tasks_for_today_view(today_str: str) -> List[ItemRow]:
@@ -252,47 +303,48 @@ def fetch_tasks_for_today_view(today_str: str) -> List[ItemRow]:
     2. status != 'done'
     3. (status = 'today') OR (date <= today_str)
     """
-    conn = get_connection()
-    cur = conn.execute(
+    with connection() as conn:
+        cur = conn.execute(
         """
         SELECT id, created_at, date, due_date, raw_text, tags, ai_category,
                importance, urgency, effort, energy, status
         FROM items
         WHERE kind = 'task'
           AND status != 'done'
-          AND (status = 'today' OR date <= ?)
+          AND (status = 'today' OR (due_date IS NOT NULL AND due_date <= ?))
         ORDER BY 
             CASE WHEN status = 'today' THEN 0 ELSE 1 END,
-            date ASC,
+            CASE WHEN due_date IS NULL THEN 1 ELSE 0 END,
+            due_date ASC,
             importance DESC
         """,
         (today_str,),
-    )
-    return [dict(r) for r in cur.fetchall()]
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 
 def fetch_counts_by_date(start_date: str, end_date: str) -> List[Tuple[str, int, int]]:
     """期間内の日付ごとのタスク数/メモ数を集計。"""
-    conn = get_connection()
-    cur = conn.execute(
+    with connection() as conn:
+        cur = conn.execute(
         """
-        SELECT date,
+        SELECT CASE WHEN kind = 'task' THEN due_date ELSE date END AS display_date,
                SUM(CASE WHEN kind = 'task' AND status != 'done' THEN 1 ELSE 0 END) AS task_count,
                SUM(CASE WHEN kind = 'memo' THEN 1 ELSE 0 END) AS memo_count
         FROM items
-        WHERE date BETWEEN ? AND ?
-        GROUP BY date
-        ORDER BY date
+        WHERE (CASE WHEN kind = 'task' THEN due_date ELSE date END) BETWEEN ? AND ?
+        GROUP BY display_date
+        ORDER BY display_date
         """,
         (start_date, end_date),
-    )
-    return [(r["date"], r["task_count"], r["memo_count"]) for r in cur.fetchall()]
+        )
+        return [(r["display_date"], r["task_count"], r["memo_count"]) for r in cur.fetchall()]
 
 
 def fetch_due_date_counts_by_date(start_date: str, end_date: str) -> List[Tuple[str, int]]:
     """期間内の日付ごとの期限タスク数を集計。"""
-    conn = get_connection()
-    cur = conn.execute(
+    with connection() as conn:
+        cur = conn.execute(
         """
         SELECT due_date, COUNT(id) AS due_task_count
         FROM items
@@ -303,8 +355,8 @@ def fetch_due_date_counts_by_date(start_date: str, end_date: str) -> List[Tuple[
         ORDER BY due_date
         """,
         (start_date, end_date),
-    )
-    return [(r["due_date"], r["due_task_count"]) for r in cur.fetchall()]
+        )
+        return [(r["due_date"], r["due_task_count"]) for r in cur.fetchall()]
 
 
 
@@ -312,8 +364,7 @@ def insert_weekly_review(payload: "WeeklyReviewPayload") -> int:
     """週次振り返りを items に保存して ID を返す。"""
     now = dt.datetime.now().isoformat(timespec="seconds")
     markdown = payload.to_markdown()
-    conn = get_connection()
-    with conn:
+    with connection() as conn, conn:
         cur = conn.execute(
             """
             INSERT INTO items (
@@ -356,8 +407,7 @@ def update_item_fields(item_id: int, **fields: Any) -> None:
     if not updates:
         return
     params.append(item_id)
-    conn = get_connection()
-    with conn:
+    with connection() as conn, conn:
         conn.execute(
             f"UPDATE items SET {', '.join(updates)} WHERE id = ?", params
         )
@@ -378,25 +428,24 @@ def classify_inbox_items(
     未分類のインボックスメモをルールベース分類し、task ならタスク化する。
     戻り値は処理数とステータス変更数の簡易サマリ。
     """
-    conn = get_connection()
-    cur = conn.execute(
-        """
-        SELECT id, raw_text
-        FROM items
-        WHERE status = 'inbox'
-          AND ai_category IS NULL
-        """
-    )
-    rows = cur.fetchall()
-    if not rows:
-        return ClassificationSummary(0, 0, 0, 0)
+    with connection() as conn, conn:
+        cur = conn.execute(
+            """
+            SELECT id, raw_text
+            FROM items
+            WHERE status = 'inbox'
+              AND ai_category IS NULL
+            """
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return ClassificationSummary(0, 0, 0, 0)
 
-    processed = 0
-    converted_to_task = 0
-    updated_status_today = 0
-    updated_status_week = 0
+        processed = 0
+        converted_to_task = 0
+        updated_status_today = 0
+        updated_status_week = 0
 
-    with conn:
         for row in rows:
             processed += 1
             result = classify_fn(row["raw_text"])
@@ -429,46 +478,45 @@ def classify_inbox_items(
             )
             converted_to_task += 1 if kind == "task" else 0
 
-    return ClassificationSummary(
-        processed=processed,
-        converted_to_task=converted_to_task,
-        updated_status_today=updated_status_today,
-        updated_status_week=updated_status_week,
-    )
+        return ClassificationSummary(
+            processed=processed,
+            converted_to_task=converted_to_task,
+            updated_status_today=updated_status_today,
+            updated_status_week=updated_status_week,
+        )
 
 
 def fetch_weekly_review_sources(
     start_date: str, end_date: str
 ) -> Dict[str, List[ItemRow]]:
     """週次振り返り用に期間内の task/memo をまとめて取得。"""
-    conn = get_connection()
-    tasks_cur = conn.execute(
-        """
-        SELECT *
-        FROM items
-        WHERE date BETWEEN ? AND ?
-          AND kind = 'task'
-        """,
-        (start_date, end_date),
-    )
-    memos_cur = conn.execute(
-        """
-        SELECT *
-        FROM items
-        WHERE date BETWEEN ? AND ?
-          AND kind = 'memo'
-        """,
-        (start_date, end_date),
-    )
-    return {"tasks": [dict(r) for r in tasks_cur.fetchall()],
-            "memos": [dict(r) for r in memos_cur.fetchall()]}
+    with connection() as conn:
+        tasks_cur = conn.execute(
+            """
+            SELECT *
+            FROM items
+            WHERE kind = 'task'
+              AND (date BETWEEN ? AND ? OR due_date BETWEEN ? AND ?)
+            """,
+            (start_date, end_date, start_date, end_date),
+        )
+        memos_cur = conn.execute(
+            """
+            SELECT *
+            FROM items
+            WHERE date BETWEEN ? AND ?
+              AND kind = 'memo'
+            """,
+            (start_date, end_date),
+        )
+        return {"tasks": [dict(r) for r in tasks_cur.fetchall()],
+                "memos": [dict(r) for r in memos_cur.fetchall()]}
 
 
 def create_idea_session(title: str, summary: str, source_text: str, chat_history: str = "[]") -> int:
     """新しいアイデアセッションを作成する。"""
-    conn = get_connection()
     now = dt.datetime.now().isoformat(timespec="seconds")
-    with conn:
+    with connection() as conn, conn:
         cur = conn.execute(
             """
             INSERT INTO idea_sessions (title, summary, source_text, chat_history, created_at, updated_at)
@@ -481,9 +529,8 @@ def create_idea_session(title: str, summary: str, source_text: str, chat_history
 
 def update_idea_session_chat(session_id: int, chat_history: str) -> None:
     """アイデアセッションのチャット履歴を更新する。"""
-    conn = get_connection()
     now = dt.datetime.now().isoformat(timespec="seconds")
-    with conn:
+    with connection() as conn, conn:
         conn.execute(
             """
             UPDATE idea_sessions
@@ -496,34 +543,34 @@ def update_idea_session_chat(session_id: int, chat_history: str) -> None:
 
 def fetch_idea_sessions() -> List[ItemRow]:
     """アイデアセッション一覧を取得する（更新日時順）。"""
-    conn = get_connection()
-    cur = conn.execute(
-        """
-        SELECT id, title, summary, updated_at
-        FROM idea_sessions
-        ORDER BY updated_at DESC
-        """
-    )
-    return [dict(r) for r in cur.fetchall()]
+    with connection() as conn:
+        cur = conn.execute(
+            """
+            SELECT id, title, summary, updated_at
+            FROM idea_sessions
+            ORDER BY updated_at DESC
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 
 def get_idea_session(session_id: int) -> Optional[ItemRow]:
     """指定されたIDのアイデアセッションを取得する。"""
-    conn = get_connection()
-    cur = conn.execute(
-        """
-        SELECT *
-        FROM idea_sessions
-        WHERE id = ?
-        """,
-        (session_id,),
-    )
-    row = cur.fetchone()
-    return dict(row) if row else None
+    with connection() as conn:
+        cur = conn.execute(
+            """
+            SELECT *
+            FROM idea_sessions
+            WHERE id = ?
+            """,
+            (session_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
 
 
 def delete_idea_session(session_id: int) -> None:
     """アイデアセッションを削除する。"""
-    conn = get_connection()
-    with conn:
+    with connection() as conn, conn:
+        conn.execute("DELETE FROM mindmap_nodes WHERE project_id = ?", (session_id,))
         conn.execute("DELETE FROM idea_sessions WHERE id = ?", (session_id,))

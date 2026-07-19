@@ -8,7 +8,6 @@ import streamlit as st
 
 from symnote.core.db import (
     fetch_counts_by_date,
-    fetch_due_date_counts_by_date,
     fetch_items_by_date,
     fetch_tasks_due_on,
     update_item_fields,
@@ -75,10 +74,6 @@ def render_calendar_tab() -> None:
             counts[d_str]["task"] = task_count
             counts[d_str]["memo"] = memo_count
     
-    for d_str, due_count in fetch_due_date_counts_by_date(start_date.isoformat(), end_date.isoformat()):
-        if d_str in counts:
-            counts[d_str]["due"] = due_count
-
     # Calendar Grid
     # Header
     cols = st.columns(7)
@@ -124,7 +119,13 @@ def render_calendar_tab() -> None:
     target_date_str = st.session_state.get("selected_calendar_date", date.today().isoformat())
     st.markdown(f"### {target_date_str} の詳細")
     
-    created_items = fetch_items_by_date(target_date_str)
+    # Tasks belong to calendar dates through ``due_date``.  The legacy ``date``
+    # field is their creation date, so only non-task items are retrieved by it.
+    created_items = [
+        item
+        for item in fetch_items_by_date(target_date_str)
+        if item.get("kind") != "task"
+    ]
     due_tasks = fetch_tasks_due_on(target_date_str)
 
     combined_items = {item['id']: item for item in created_items}
@@ -152,7 +153,8 @@ def render_calendar_tab() -> None:
         else:
             for t in uncompleted_tasks:
                 is_due = t.get("due_date") == target_date_str
-                is_created = t.get("date") == target_date_str
+                # Tasks are present here only because their deadline matches.
+                is_created = False
                 label = ""
                 if is_due and is_created:
                     label = " (作成 & 期限)"

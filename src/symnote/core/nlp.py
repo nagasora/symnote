@@ -151,7 +151,9 @@ def suggest_today_tasks(
         effort: Effort = task.get("effort") or "medium"
         energy: Energy = task.get("energy") or "mid"
         raw_text = task.get("raw_text", "")
-        due = _parse_due_date(task.get("date"))
+        # ``date`` is the creation date.  Deadline-aware suggestions must only
+        # inspect ``due_date`` so a newly created task is not treated as due now.
+        due = _parse_due_date(task.get("due_date"))
 
         score = priority_score(importance, urgency, effort, energy)
         reasons: List[str] = []
@@ -342,4 +344,130 @@ def brainstorm_ideas(context: str, user_query: str) -> List[str]:
         return data.get("ideas", [])
     except Exception as e:
         print(f"Error brainstorming: {e}")
+        return []
+
+
+def generate_initial_mindmap(source_text: str) -> Dict[str, Any]:
+    """
+    Generate an initial mind map structure from source text.
+    Returns a JSON dict representing the root node and its children.
+    Structure:
+    {
+        "kind": "root",
+        "title": "Root Title",
+        "body": "Root Summary",
+        "children": [
+            { "kind": "idea", "title": "Idea 1", "body": "...", "children": [...] },
+            ...
+        ]
+    }
+    """
+    config = load_config()
+    genai.configure(api_key=config.llm_api_key)
+    generation_config = genai.GenerationConfig(max_output_tokens=config.max_tokens)
+    model = genai.GenerativeModel(config.llm_model, generation_config=generation_config)
+
+    prompt = f"""
+    以下のテキストを分析し、マインドマップの初期構造を生成してください。
+    構造は以下のJSONフォーマットで出力してください。
+    
+    ルートノード（全体テーマ）の下に、3〜5個の主要な「アイデア(idea)」をぶら下げ、
+    各アイデアの下に、具体的な「タスク(task)」や「メモ(note)」をいくつかぶら下げてください。
+    
+    テキスト:
+    {source_text[:15000]}
+    
+    出力JSONフォーマット:
+    {{
+      "kind": "root",
+      "title": "プロジェクト全体のタイトル",
+      "body": "全体の要約・概要",
+      "children": [
+        {{
+          "kind": "idea",
+          "title": "主要アイデア1",
+          "body": "説明",
+          "children": [
+             {{ "kind": "task", "title": "具体的なタスク", "body": "詳細" }},
+             {{ "kind": "note", "title": "関連メモ", "body": "詳細" }}
+          ]
+        }},
+        ...
+      ]
+    }}
+    """
+
+    try:
+        response = model.generate_content(prompt)
+        content = response.text
+        # Robust JSON extraction
+        content = content.strip()
+        if content.startswith("```"):
+            # Remove first line (```json or ```)
+            content = content.split("\n", 1)[1]
+            # Remove last line (```)
+            if content.endswith("```"):
+                content = content.rsplit("\n", 1)[0]
+        
+        return json.loads(content)
+    except Exception as e:
+        print(f"Error generating mindmap: {e}")
+        return {
+            "kind": "root",
+            "title": "生成エラー",
+            "body": f"生成失敗: {e}",
+            "children": []
+        }
+
+
+def expand_node(
+    node_title: str,
+    node_body: str,
+    context_summary: str,
+    mode: str
+) -> List[Dict[str, Any]]:
+    """
+    Expand a node by generating related children.
+    mode: 'related_ideas' | 'related_tasks' | 'detail_steps'
+    """
+    config = load_config()
+    genai.configure(api_key=config.llm_api_key)
+    generation_config = genai.GenerationConfig(max_output_tokens=config.max_tokens)
+    model = genai.GenerativeModel(config.llm_model, generation_config=generation_config)
+
+    prompt_mode = ""
+    if mode == "related_ideas":
+        prompt_mode = "このアイデアに関連する、または派生する新しいアイデアを**厳選して上位3つのみ**挙げてください。"
+    elif mode == "related_tasks":
+        prompt_mode = "このアイデアを実現するための具体的なタスクを**厳選して上位3つのみ**挙げてください。"
+    elif mode == "detail_steps":
+        prompt_mode = "このタスクを実行するための詳細なステップ（手順）を分解して挙げてください（主要なステップ3〜5つ程度）。"
+    else:
+        return []
+
+    prompt = f"""
+    以下のノード情報を元に、子ノードを生成してください。
+    
+    プロジェクト概要: {context_summary}
+    親ノードタイトル: {node_title}
+    親ノード説明: {node_body}
+    
+    指示: {prompt_mode}
+    
+    出力は以下のJSONフォーマット（リスト形式）のみでお願いします。
+    [
+      {{ "kind": "idea/task/detail", "title": "タイトル", "body": "説明" }},
+      ...
+    ]
+    ※ kind は、related_ideasなら'idea'、related_tasksなら'task'、detail_stepsなら'detail'としてください。
+    """
+
+    try:
+        response = model.generate_content(prompt)
+        content = response.text
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        return json.loads(content)
+    except Exception as e:
+        print(f"Error expanding node: {e}")
         return []

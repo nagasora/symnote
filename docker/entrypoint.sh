@@ -1,18 +1,17 @@
-#!/bin/bash
-# Why not: CMDよりENTRYPOINTの方がSIGTERM処理に安定するため採用
+#!/bin/sh
+set -eu
 
-# .env を読み込む（grep が無い環境にも対応）
+# Load a local .env only when one is explicitly mounted into the container.
 if [ -f "/app/.env" ]; then
   while IFS='=' read -r key value; do
     case "$key" in
-      ''|\#*) continue;;
-      *) export "$key"="$value";;
+      ''|'#'*) continue ;;
+      *) export "$key=$value" ;;
     esac
   done < "/app/.env"
 fi
 
-# Python パスを通す
-export PYTHONPATH="/app/src:${PYTHONPATH}"
+export PYTHONPATH="/app/src${PYTHONPATH:+:$PYTHONPATH}"
 
-# Streamlit 起動
+# Run as PID 1 so stop signals are forwarded correctly.
 exec streamlit run src/symnote/app.py --server.address=0.0.0.0 --server.port=8501
