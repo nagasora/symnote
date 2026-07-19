@@ -33,14 +33,25 @@ from symnote.core.nlp import (
     summarize_and_extract_tasks_from_text,
     analyze_source_and_generate_title,
     brainstorm_ideas,
+    generate_initial_mindmap,
+    expand_node,
+)
+from symnote.core.mindmap import (
+    MindmapNode,
+    create_node,
+    get_nodes_by_project,
+    update_node,
+    delete_node_and_descendants,
+    ensure_task_item_for_node,
+    save_mindmap_tree,
 )
 from symnote.calendar_app import render_calendar_tab
 from symnote.core.doc_loader import extract_text_from_file
 
 
 def _due_priority_tuple(task: Dict) -> Tuple[dt.date, float, int]:
-    """Sort key: due date (date列) が近い順 → 優先度スコア → ID。"""
-    date_str = task.get("date")
+    """Sort tasks by due date, then by their calculated priority score."""
+    date_str = task.get("due_date")
     try:
         due = dt.date.fromisoformat(date_str) if date_str else dt.date.max
     except ValueError:
@@ -109,9 +120,8 @@ def render_inbox_tab() -> None:
             if not raw_text.strip():
                 st.warning("タスク本文を入力してください。")
             else:
-                # タスクとして保存 (insert_taskを使用)
-                # insert_taskは date_str を受け取るが、これは実行日/期限として扱われることが多い
-                note_id = insert_task(raw_text=raw_text, tags=tags, date_str=due_date_str)
+                # ``date`` is the creation date; the selected date is the task deadline.
+                note_id = insert_task(raw_text=raw_text, tags=tags, due_date=due_date_str)
                 st.success(f"タスクを保存しました (ID: {note_id})")
 
     if st.button("AI でインボックスを整理", type="primary"):
@@ -146,11 +156,11 @@ def render_task_editor(task: Dict) -> None:
 
     default_tags = task.get("tags") or ""
     default_raw_text = task.get("raw_text", "")
-    default_date_str = task.get("date")
-    default_date = None
-    if default_date_str:
+    default_due_date_str = task.get("due_date")
+    default_due_date = None
+    if default_due_date_str:
         try:
-            default_date = dt.date.fromisoformat(default_date_str)
+            default_due_date = dt.date.fromisoformat(default_due_date_str)
         except ValueError:
             pass
 
@@ -179,7 +189,7 @@ def render_task_editor(task: Dict) -> None:
             
         col_date, col_status = st.columns(2)
         with col_date:
-            new_date = st.date_input("期限", value=default_date, key=f"date_{task['id']}")
+            new_due_date = st.date_input("期限", value=default_due_date, key=f"due_date_{task['id']}")
         with col_status:
             status = st.selectbox(
                 "ステータス",
@@ -195,7 +205,7 @@ def render_task_editor(task: Dict) -> None:
                 task["id"],
                 tags=new_tags,
                 raw_text=raw_text,
-                date=new_date.isoformat() if new_date else None,
+                due_date=new_due_date.isoformat() if new_due_date else None,
                 importance=importance,
                 urgency=urgency,
                 effort=effort,
@@ -241,10 +251,10 @@ def render_task_organizer_tab() -> None:
         st.info("AI でメモをタスクに分類するとここに表示されます。")
         return
 
-    # Group by date
+    # Group tasks by deadline. ``date`` remains the immutable creation date.
     tasks_by_date: Dict[str, List[Dict]] = {}
     for task in tasks:
-        d = task.get("date") or "期限なし"
+        d = task.get("due_date") or "期限なし"
         if d not in tasks_by_date:
             tasks_by_date[d] = []
         tasks_by_date[d].append(task)
@@ -275,7 +285,7 @@ def _display_tasks(tasks: List[Dict], title: str) -> None:
     
     for idx, task in enumerate(sorted_tasks, start=1):
         # Overdue check
-        due_str = task.get("date")
+        due_str = task.get("due_date")
         is_overdue = False
         if due_str:
             try:
@@ -444,91 +454,169 @@ def render_idea_tab() -> None:
                         st.session_state["idea_generated_items"] = [{"text": idea, "added": False} for idea in initial_ideas]
                         st.session_state["idea_chat_history"] = [] 
                         
-                    st.success("分析完了！セッションを保存しました。")
+                        # Generate Initial Mind Map
+                        # Generate Initial Mind Map
+                        st.write("マインドマップ生成中...")
+                        try:
+                            mindmap_data = generate_initial_mindmap(source_text)
+                            st.write(f"データ受信: {len(mindmap_data.get('children', []))} items")
+                            save_mindmap_tree(session_id, mindmap_data)
+                            st.write("DB保存完了")
+                        except Exception as e:
+                            st.error(f"マインドマップ生成エラー: {e}")
+                        
+                    st.success("分析完了！セッションとマインドマップを保存しました。")
                     st.rerun()
                 else:
                     st.warning("資料をアップロードするかテキストを入力してください。")
 
     with col_right:
-        st.markdown("### 2. ブレインストーミング & タスク化")
+        st.markdown("### 2. マインドマップ (アイデア整理)")
         
-        if "idea_source_text" not in st.session_state:
+        if "current_session_id" not in st.session_state:
             st.info("左側のパネルで資料を分析するか、過去のセッションを選択してください。")
+            return
+
+        session_id = st.session_state["current_session_id"]
+        nodes = get_nodes_by_project(session_id)
+        
+        if not nodes:
+            st.info("マインドマップがまだありません。")
+            if st.button("マインドマップを初期生成 (Manual Root)", key="init_mindmap_btn"):
+                # Phase 0: Manual Root Creation
+                root_title = st.session_state.get("idea_project_title", "New Idea Map")
+                create_node(
+                    project_id=session_id,
+                    kind="root",
+                    title=root_title,
+                    body="Root node created manually."
+                )
+                st.rerun()
         else:
-            # Chat History Display
-            chat_history = st.session_state.get("idea_chat_history", [])
-            for msg in chat_history:
-                with st.chat_message(msg["role"]):
-                    st.write(msg["content"])
+            # Render Tree
+            _render_mindmap_tree(nodes)
 
-            # Chat Interface
-            user_query = st.chat_input("AIに質問・アイデア出しを依頼")
-            if user_query:
-                with st.chat_message("user"):
-                    st.write(user_query)
+def _render_mindmap_tree(nodes: List[MindmapNode], level: int = 0) -> None:
+    """Recursively render mindmap nodes. 
+    Uses Expanders for Level 1 (Ideas).
+    For deeper levels, uses flat rows with visual indentation to avoid nested columns/expanders.
+    """
+    for node in nodes:
+        # Icon based on kind
+        icon = "📄"
+        if node.kind == "root": icon = "🌳"
+        elif node.kind == "idea": icon = "💡"
+        elif node.kind == "task": icon = "✅"
+        elif node.kind == "detail": icon = "📝"
+        elif node.kind == "note": icon = "📌"
+        elif node.kind == "link": icon = "🔗"
+        
+        label = f"{icon} {node.title}"
+        
+        if level == 0:
+            # Root: Header
+            st.markdown(f"### {label}")
+            if node.body:
+                st.caption(node.body)
+            _render_node_actions(node)
+            if node.children:
+                _render_mindmap_tree(node.children, level + 1)
                 
-                with st.spinner("AIが考え中..."):
-                    new_ideas = brainstorm_ideas(st.session_state["idea_source_text"], user_query)
-                    
-                    ai_response = f"{len(new_ideas)} 個のアイデアを生成しました。\n\n" + "\n".join([f"- {idea}" for idea in new_ideas])
-                    
-                    with st.chat_message("ai"):
-                        st.write(ai_response)
-                    
-                    # Update State
-                    st.session_state["idea_chat_history"].append({"role": "user", "content": user_query})
-                    st.session_state["idea_chat_history"].append({"role": "ai", "content": ai_response})
-                    
-                    # Add new ideas to generated items list
-                    if "idea_generated_items" not in st.session_state:
-                        st.session_state["idea_generated_items"] = []
-                    for idea in new_ideas:
-                        st.session_state["idea_generated_items"].append({"text": idea, "added": False})
-                    
-                    # Update DB
-                    if "current_session_id" in st.session_state:
-                         update_idea_session_chat(st.session_state["current_session_id"], json.dumps(st.session_state["idea_chat_history"], ensure_ascii=False))
+        elif level == 1:
+            # Idea: Expander
+            with st.expander(label, expanded=True):
+                st.caption(f"ID: {node.id} | {node.kind}")
+                if node.body:
+                    st.write(node.body)
+                _render_node_actions(node)
+                
+                if node.children:
+                    _render_mindmap_tree(node.children, level + 1)
+        else:
+            # Deeper levels: Flat rows with indentation
+            # We are already inside the Level 1 Expander here.
+            # Do NOT create a new column wrapper for the whole node that contains children.
+            # Just render the current node row, then recurse.
+            
+            indent_spaces = "&nbsp;" * ((level - 1) * 4)
+            
+            # Layout: [Title (indented)] [Actions]
+            # We use columns for the row, but ensure recursion is OUTSIDE these columns.
+            
+            # Note: We need to render the title and actions.
+            # To keep alignment, maybe we just use one markdown for title?
+            # But we need buttons.
+            
+            # col_row = st.columns([3, 1]) # Unused, removing to avoid confusion
+            # Actually, standard actions take up space. 
+            # Let's use the standard action renderer but maybe compact it?
+            # For now, let's just render the title with indentation in a full width, 
+            # and actions below or to the right?
+            # Let's try to keep the same action row style.
+            
+            st.markdown(f"{indent_spaces} **{label}**", unsafe_allow_html=True)
+            if node.body:
+                st.caption(f"{indent_spaces} {node.body}", unsafe_allow_html=True)
+            
+            # Render actions with indentation? 
+            # It's hard to indent Streamlit widgets. 
+            # We'll just render them normally. They will appear left-aligned in the expander.
+            # To make it look associated, maybe we use a container? No, that nests.
+            # Let's just render actions.
+            _render_node_actions(node)
+            
+            if node.children:
+                _render_mindmap_tree(node.children, level + 1)
 
-            # Display Ideas for Adding
-            st.divider()
-            st.markdown("#### 生成されたアイデア (タスク化)")
-            if "idea_generated_items" in st.session_state:
-                items = st.session_state["idea_generated_items"]
-                # Use a copy to allow modification during iteration if needed, though we use indices
-                for i, item in enumerate(items):
-                    col_text, col_btn, col_del = st.columns([6, 2, 1])
-                    with col_text:
-                        st.write(f"- {item['text']}")
-                    with col_btn:
-                        if not item["added"]:
-                            if st.button("追加", key=f"add_idea_{i}"):
-                                title = st.session_state["idea_project_title"]
-                                # Add to inbox with title as tag
-                                insert_task(
-                                    raw_text=f"[{title}] {item['text']}",
-                                    tags=title,
-                                    status="inbox",
-                                )
-                                item["added"] = True
-                                st.toast(f"インボックスに追加しました")
-                                st.rerun()
-                        else:
-                            st.caption("追加済")
-                    with col_del:
-                         if st.button("×", key=f"dismiss_idea_{i}"):
-                             st.session_state[f"confirm_dismiss_idea_{i}"] = True
-                             st.rerun()
-                         
-                         if st.session_state.get(f"confirm_dismiss_idea_{i}"):
-                             st.warning("削除？")
-                             if st.button("はい", key=f"yes_dismiss_{i}"):
-                                 items.pop(i)
-                                 del st.session_state[f"confirm_dismiss_idea_{i}"]
-                                 st.rerun()
-                             if st.button("いいえ", key=f"no_dismiss_{i}"):
-                                 del st.session_state[f"confirm_dismiss_idea_{i}"]
-                                 st.rerun()
+def _render_node_actions(node: MindmapNode) -> None:
+    """Helper to render action buttons for a node."""
+    col_acts = st.columns(4)
+    with col_acts[0]:
+        if st.button("✨アイデア拡散", key=f"expand_idea_{node.id}"):
+            with st.spinner("AIがアイデアを広げています..."):
+                context = st.session_state.get("idea_summary", "")
+                new_items = expand_node(node.title, node.body, context, "related_ideas")
+                _save_expansion_items(node.project_id, node.id, new_items)
+                st.rerun()
+    with col_acts[1]:
+        if st.button("✨タスク抽出", key=f"expand_task_{node.id}"):
+            with st.spinner("AIがタスクを抽出しています..."):
+                context = st.session_state.get("idea_summary", "")
+                new_items = expand_node(node.title, node.body, context, "related_tasks")
+                _save_expansion_items(node.project_id, node.id, new_items)
+                st.rerun()
+    with col_acts[2]:
+        if node.kind == "task":
+            if st.button("✨詳細化", key=f"expand_step_{node.id}"):
+                with st.spinner("AIが手順を分解しています..."):
+                    context = st.session_state.get("idea_summary", "")
+                    new_items = expand_node(node.title, node.body, context, "detail_steps")
+                    _save_expansion_items(node.project_id, node.id, new_items)
+                    st.rerun()
+            
+            # Task Sync Button
+            if node.linked_item_id:
+                st.caption(f"✅ 連携済 (ID: {node.linked_item_id})")
+            else:
+                if st.button("📥 インボックスへ", key=f"sync_task_{node.id}"):
+                    item_id = ensure_task_item_for_node(node)
+                    st.success(f"タスクを作成しました (ID: {item_id})")
+                    st.rerun()
 
+    with col_acts[3]:
+            if st.button("🗑️", key=f"del_node_{node.id}"):
+                delete_node_and_descendants(node.id)
+                st.rerun()
+
+def _save_expansion_items(project_id: int, parent_id: int, items: List[Dict[str, Any]]) -> None:
+    for item in items:
+        create_node(
+            project_id=project_id,
+            kind=item.get("kind", "idea"),
+            title=item.get("title", "No Title"),
+            body=item.get("body", ""),
+            parent_id=parent_id
+        )
 
 def render_doc_analysis_tab() -> None:
     st.subheader("📄 ドキュメント分析")

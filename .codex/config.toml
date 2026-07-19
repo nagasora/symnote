@@ -1,0 +1,10 @@
+# Project-scoped Codex settings for SymNote.
+# Keep agents shallow and bounded because all workers share this local checkout.
+model = "gpt-5.6-terra"
+model_reasoning_effort = "medium"
+
+[agents]
+max_threads = 4
+max_depth = 1
+job_max_runtime_seconds = 1800
+interrupt_message = true

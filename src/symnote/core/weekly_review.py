@@ -61,7 +61,7 @@ def generate_weekly_review(today: date | None = None) -> WeeklyReviewPayload:
     overdue = [
         t
         for t in tasks
-        if t.get("date") and t.get("status") != "done" and t["date"] < end
+        if t.get("due_date") and t.get("status") != "done" and t["due_date"] < end
     ]
 
     summary_parts: List[str] = []
@@ -96,9 +96,9 @@ def generate_weekly_review(today: date | None = None) -> WeeklyReviewPayload:
 
     focus_next: List[str] = []
     upcoming = [
-        t for t in tasks if t.get("status") in {"today", "week"} and t.get("date") and t["date"] >= end
+        t for t in tasks if t.get("status") in {"today", "week"} and t.get("due_date") and t["due_date"] >= end
     ]
-    upcoming.sort(key=lambda t: t.get("date"))
+    upcoming.sort(key=lambda t: t.get("due_date"))
     for task in upcoming[:3]:
         focus_next.append(f"ID {task['id']} {task.get('raw_text', '')[:40]}")
     if not focus_next and carry_over:
