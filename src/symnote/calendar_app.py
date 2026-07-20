@@ -10,6 +10,7 @@ from symnote.core.db import (
     fetch_counts_by_date,
     fetch_items_by_date,
     fetch_tasks_due_on,
+    complete_task,
     update_item_fields,
 )
 
@@ -177,8 +178,11 @@ def render_calendar_tab() -> None:
                     st.write(t.get("raw_text", ""))
                     st.caption(f"優先度: {t.get('importance')} × {t.get('urgency')} / effort {t.get('effort')} / energy {t.get('energy')}")
                     if st.button("✔ 完了", key=f"done_calendar_{t['id']}"):
-                        update_item_fields(t["id"], status="done")
-                        st.success("完了に更新しました。")
+                        next_task_id = complete_task(t["id"])
+                        if next_task_id:
+                            st.success("完了にし、次回分のタスクを作成しました。")
+                        else:
+                            st.success("完了に更新しました。")
                         st.rerun()
 
     with tab_completed:

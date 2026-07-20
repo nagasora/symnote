@@ -34,7 +34,7 @@ python -m venv .venv
 pip install -r requirements.txt
 
 cp .env.example .env        # LLM_API_KEY (Gemini) を設定
-# LLM_MODEL=gemini-2.0-flash-lite (デフォルト)
+# LLM_MODEL=gemini-3.1-flash-lite (デフォルト)
 
 streamlit run src/symnote/app.py
 ```
@@ -45,6 +45,20 @@ cp .env.example .env        # DB_PATH は /app/symnote.db 等に変更推奨
 docker compose up --build
 ```
 `http://localhost:8501` にアクセスするとアプリが表示されます。
+
+## Google Calendar 連携
+
+期限のある未完了タスクは、Google Calendar に期限日の 09:00（既定）から 30 分の予定として自動同期できます。タスクの保存・編集・完了・削除はローカル SQLite に先に記録されるため、オフライン時も失われず、次回アプリ起動時または「今すぐ同期」で再試行されます。Google の認証トークンは SQLite や `.env` には保存せず、OS の資格情報ストアに保存します。
+
+1. Google Cloud Console で Google Calendar API を有効にし、**Desktop app** 用 OAuth クライアントを作成する。
+2. ダウンロードしたクライアント JSON の絶対パスを `.env` の `GOOGLE_CALENDAR_CLIENT_SECRET_PATH` に設定する。
+3. アプリのサイドバーから「Google Calendar」を開き、「Google Calendar に接続」を選ぶ。
+
+`GOOGLE_CALENDAR_ID` は対象カレンダー（既定: `primary`）、`GOOGLE_CALENDAR_REMINDER_MINUTES` はポップアップ通知の分数（既定: `30`）です。時刻は `GOOGLE_CALENDAR_DEADLINE_HOUR`（既定: `9`）、タイムゾーンは `GOOGLE_CALENDAR_TIMEZONE`（既定: `Asia/Tokyo`）で変更できます。通知を受け取る端末では Google Calendar アプリまたはブラウザの通知を許可してください。
+
+## 繰り返しタスク
+
+タスク登録時に「なし」「毎日」「毎週」「隔週」を選べます。繰り返しタスクを完了にすると、完了履歴を残したまま次回分が自動作成されます。各回は通常のタスクとして Google Calendar に同期されるため、予定や通知の状態も混ざりません。タスク編集画面から「繰り返しを停止」を選ぶと、以降の自動作成だけを止められます。
 
 ## ディレクトリ
 ```

@@ -17,6 +17,11 @@ class AppConfig:
     llm_api_key: str
     llm_model: str
     max_tokens: int
+    google_calendar_client_secret_path: str
+    google_calendar_id: str
+    google_calendar_reminder_minutes: int
+    google_calendar_timezone: str
+    google_calendar_deadline_hour: int
 
 
 def load_config() -> AppConfig:
@@ -30,11 +35,23 @@ def load_config() -> AppConfig:
         root = Path(data_home) if data_home else Path.home() / ".local" / "share"
         db_path = str(root / "SymNote" / "symnote.db")
     llm_api_key: str = os.getenv("LLM_API_KEY", "")
-    llm_model: str = os.getenv("LLM_MODEL", "gemini-2.0-flash-lite")
+    llm_model: str = os.getenv("LLM_MODEL", "gemini-3.1-flash-lite")
     max_tokens: int = int(os.getenv("MAX_TOKENS", "4096"))
+    data_dir = Path(db_path).expanduser().parent
+    google_calendar_client_secret_path = os.getenv(
+        "GOOGLE_CALENDAR_CLIENT_SECRET_PATH",
+        str(data_dir / "google_oauth_client.json"),
+    )
     return AppConfig(
         db_path=db_path,
         llm_api_key=llm_api_key,
         llm_model=llm_model,
         max_tokens=max_tokens,
+        google_calendar_client_secret_path=google_calendar_client_secret_path,
+        google_calendar_id=os.getenv("GOOGLE_CALENDAR_ID", "primary"),
+        google_calendar_reminder_minutes=int(
+            os.getenv("GOOGLE_CALENDAR_REMINDER_MINUTES", "30")
+        ),
+        google_calendar_timezone=os.getenv("GOOGLE_CALENDAR_TIMEZONE", "Asia/Tokyo"),
+        google_calendar_deadline_hour=int(os.getenv("GOOGLE_CALENDAR_DEADLINE_HOUR", "9")),
     )

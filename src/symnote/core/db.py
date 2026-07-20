@@ -43,7 +43,7 @@ def get_connection() -> sqlite3.Connection:
 def _migrate_db(conn: sqlite3.Connection) -> None:
     """必要なカラムが足りない場合に ALTER TABLE で追加する簡易マイグレーション。"""
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if current > 3:
+    if current > 5:
         raise RuntimeError("This database requires a newer version of SymNote.")
 
     if current < 1:
@@ -64,6 +64,50 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
     if current < 3:
         # Indexes are created below after all current-version tables exist.
         conn.execute("PRAGMA user_version = 3")
+        current = 3
+    if current < 4:
+        # Keep calendar state separate from user-owned tasks.  A task mutation
+        # only queues work here; network calls are performed by the sync service.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS calendar_task_sync (
+              task_id INTEGER PRIMARY KEY,
+              event_id TEXT,
+              last_synced_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS calendar_sync_outbox (
+              task_id INTEGER PRIMARY KEY,
+              operation TEXT NOT NULL CHECK(operation IN ('upsert', 'delete')),
+              changed_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("PRAGMA user_version = 4")
+        current = 4
+    if current < 5:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
+        if "recurrence_rule_id" not in columns:
+            conn.execute("ALTER TABLE items ADD COLUMN recurrence_rule_id INTEGER")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_recurrence_rules (
+              id INTEGER PRIMARY KEY,
+              frequency TEXT NOT NULL CHECK(frequency IN ('daily', 'weekly')),
+              interval_days INTEGER NOT NULL CHECK(interval_days > 0),
+              active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_recurrence_occurrence "
+            "ON items(recurrence_rule_id, due_date) WHERE recurrence_rule_id IS NOT NULL"
+        )
+        conn.execute("PRAGMA user_version = 5")
 
 
 def init_db() -> None:
@@ -94,6 +138,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_due_date ON items(due_date);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_kind ON items(kind);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_calendar_outbox_changed ON calendar_sync_outbox(changed_at);")
 
         # idea_sessions table
         conn.execute(
@@ -176,7 +221,10 @@ def insert_item(
                 tags,
             ),
         )
-        return int(cur.lastrowid)
+        item_id = int(cur.lastrowid)
+        if kind == "task":
+            _queue_calendar_sync(conn, item_id, "upsert")
+        return item_id
 
 
 def insert_memo(raw_text: str, date_str: Optional[str] = None, tags: str = "", due_date: Optional[str] = None) -> int:
@@ -190,9 +238,10 @@ def insert_task(
     tags: str = "",
     due_date: Optional[str] = None,
     status: str = "inbox",
+    recurrence_rule_id: Optional[int] = None,
 ) -> int:
     """タスクを直接登録する。"""
-    return insert_item(
+    task_id = insert_item(
         kind="task",
         raw_text=raw_text,
         date_str=date_str,
@@ -203,6 +252,134 @@ def insert_task(
         importance=3,
         urgency=3,
     )
+    if recurrence_rule_id is not None:
+        with connection() as conn, conn:
+            conn.execute(
+                "UPDATE items SET recurrence_rule_id = ? WHERE id = ?",
+                (recurrence_rule_id, task_id),
+            )
+    return task_id
+
+
+def create_recurring_task(
+    raw_text: str,
+    due_date: str,
+    frequency: str,
+    interval: int = 1,
+    tags: str = "",
+    status: str = "inbox",
+) -> int:
+    """Create the first occurrence of a daily, weekly, or biweekly task."""
+    if frequency not in {"daily", "weekly"} or interval < 1:
+        raise ValueError("Unsupported recurrence rule")
+    dt.date.fromisoformat(due_date)
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    interval_days = interval if frequency == "daily" else interval * 7
+    with connection() as conn, conn:
+        rule = conn.execute(
+            """
+            INSERT INTO task_recurrence_rules (frequency, interval_days, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (frequency, interval_days, now),
+        )
+        rule_id = int(rule.lastrowid)
+        cur = conn.execute(
+            """
+            INSERT INTO items (
+              created_at, date, due_date, kind, raw_text, ai_category,
+              importance, urgency, effort, energy, status, tags, embedding,
+              recurrence_rule_id
+            ) VALUES (?, ?, ?, 'task', ?, 'task', 3, 3, NULL, NULL, ?, ?, NULL, ?)
+            """,
+            (now, dt.date.today().isoformat(), due_date, raw_text, status, tags, rule_id),
+        )
+        task_id = int(cur.lastrowid)
+        _queue_calendar_sync(conn, task_id, "upsert")
+        return task_id
+
+
+def recurrence_label(task: ItemRow) -> Optional[str]:
+    """Return a compact user-facing cadence label for a task occurrence."""
+    interval_days = task.get("recurrence_interval_days")
+    if not interval_days:
+        return None
+    if interval_days == 1:
+        return "daily"
+    if interval_days == 7:
+        return "weekly"
+    if interval_days == 14:
+        return "biweekly"
+    return f"every {interval_days} days"
+
+
+def complete_task(item_id: int) -> Optional[int]:
+    """Complete an occurrence and atomically create its next occurrence, if any."""
+    with connection() as conn, conn:
+        task = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        if not task or task["kind"] != "task" or task["status"] == "done":
+            return None
+        conn.execute("UPDATE items SET status = 'done' WHERE id = ?", (item_id,))
+        _queue_calendar_sync(conn, item_id, "upsert")
+        rule_id = task["recurrence_rule_id"]
+        if rule_id is None:
+            return None
+        rule = conn.execute(
+            "SELECT interval_days FROM task_recurrence_rules WHERE id = ? AND active = 1",
+            (rule_id,),
+        ).fetchone()
+        if not rule:
+            return None
+        try:
+            base_due = dt.date.fromisoformat(task["due_date"] or dt.date.today().isoformat())
+        except ValueError:
+            base_due = dt.date.today()
+        next_due = (base_due + dt.timedelta(days=rule["interval_days"])).isoformat()
+        existing = conn.execute(
+            "SELECT id FROM items WHERE recurrence_rule_id = ? AND due_date = ?",
+            (rule_id, next_due),
+        ).fetchone()
+        if existing:
+            return int(existing["id"])
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        cur = conn.execute(
+            """
+            INSERT INTO items (
+              created_at, date, due_date, kind, raw_text, ai_category,
+              importance, urgency, effort, energy, status, tags, embedding,
+              recurrence_rule_id
+            ) VALUES (?, ?, ?, 'task', ?, ?, ?, ?, ?, ?, 'inbox', ?, NULL, ?)
+            """,
+            (
+                now,
+                dt.date.today().isoformat(),
+                next_due,
+                task["raw_text"],
+                task["ai_category"],
+                task["importance"],
+                task["urgency"],
+                task["effort"],
+                task["energy"],
+                task["tags"],
+                rule_id,
+            ),
+        )
+        next_id = int(cur.lastrowid)
+        _queue_calendar_sync(conn, next_id, "upsert")
+        return next_id
+
+
+def stop_task_recurrence(item_id: int) -> None:
+    """Stop generating future occurrences while preserving all task history."""
+    with connection() as conn, conn:
+        row = conn.execute(
+            "SELECT recurrence_rule_id FROM items WHERE id = ?", (item_id,)
+        ).fetchone()
+        if row and row["recurrence_rule_id"] is not None:
+            conn.execute(
+                "UPDATE task_recurrence_rules SET active = 0 WHERE id = ?",
+                (row["recurrence_rule_id"],),
+            )
 
 def insert_standalone_memo(
     raw_text: str,
@@ -223,6 +400,11 @@ def insert_standalone_memo(
 def delete_item(item_id: int) -> None:
     """アイテムを削除する。"""
     with connection() as conn, conn:
+        row = conn.execute("SELECT kind FROM items WHERE id = ?", (item_id,)).fetchone()
+        if row and row["kind"] == "task":
+            # Retain the event mapping after the local task disappears so an
+            # interrupted/offline delete is retried on the next sync.
+            _queue_calendar_sync(conn, item_id, "delete")
         conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
 
 
@@ -248,16 +430,18 @@ def fetch_tasks(
 ) -> List[ItemRow]:
     """タスク(kind='task')を取得。status でフィルタ可能。"""
     query = [
-        "SELECT id, created_at, date, due_date, raw_text, tags, ai_category,",
-        "importance, urgency, effort, energy, status",
-        "FROM items WHERE kind = 'task'",
+        "SELECT i.id, i.created_at, i.date, i.due_date, i.raw_text, i.tags, i.ai_category,",
+        "i.importance, i.urgency, i.effort, i.energy, i.status, i.recurrence_rule_id,",
+        "r.interval_days AS recurrence_interval_days",
+        "FROM items AS i LEFT JOIN task_recurrence_rules AS r ON r.id = i.recurrence_rule_id",
+        "WHERE i.kind = 'task'",
     ]
     params: List[Any] = []
     if statuses:
         placeholders = ",".join("?" for _ in statuses)
         query.append(f"AND status IN ({placeholders})")
         params.extend(statuses)
-    query.append("ORDER BY created_at DESC LIMIT ?")
+    query.append("ORDER BY i.created_at DESC LIMIT ?")
     params.append(limit)
 
     with connection() as conn:
@@ -411,6 +595,23 @@ def update_item_fields(item_id: int, **fields: Any) -> None:
         conn.execute(
             f"UPDATE items SET {', '.join(updates)} WHERE id = ?", params
         )
+        row = conn.execute("SELECT kind FROM items WHERE id = ?", (item_id,)).fetchone()
+        if row and row["kind"] == "task":
+            _queue_calendar_sync(conn, item_id, "upsert")
+
+
+def _queue_calendar_sync(conn: sqlite3.Connection, task_id: int, operation: str) -> None:
+    """Record local task changes for later Calendar delivery, never doing I/O here."""
+    conn.execute(
+        """
+        INSERT INTO calendar_sync_outbox (task_id, operation, changed_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(task_id) DO UPDATE SET
+          operation = excluded.operation,
+          changed_at = excluded.changed_at
+        """,
+        (task_id, operation, dt.datetime.now().isoformat(timespec="seconds")),
+    )
 
 
 @dataclass(frozen=True)
@@ -476,6 +677,8 @@ def classify_inbox_items(
                     row["id"],
                 ),
             )
+            if kind == "task":
+                _queue_calendar_sync(conn, row["id"], "upsert")
             converted_to_task += 1 if kind == "task" else 0
 
         return ClassificationSummary(

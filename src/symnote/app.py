@@ -22,6 +22,10 @@ from symnote.core.db import (
     get_idea_session,
     delete_item,
     delete_idea_session,
+    complete_task,
+    create_recurring_task,
+    recurrence_label,
+    stop_task_recurrence,
 )
 from symnote.core.nlp import (
     classify_text_rule_based,
@@ -48,6 +52,13 @@ from symnote.core.mindmap import (
 from symnote.calendar_app import render_calendar_tab
 from symnote.config import load_config
 from symnote.core.doc_loader import extract_text_from_file
+from symnote.core.google_calendar import (
+    CalendarSetupError,
+    connect as connect_google_calendar,
+    disconnect as disconnect_google_calendar,
+    is_connected as google_calendar_connected,
+    sync_pending_tasks,
+)
 
 
 def _due_priority_tuple(task: Dict) -> Tuple[dt.date, float, int]:
@@ -114,6 +125,7 @@ def render_sidebar() -> str:
         "アイデア整理": "💡 アイデア整理",
         "ドキュメント分析": "📄 ドキュメント分析",
     }
+    pages["Google Calendar"] = "📆 Google Calendar"
     with st.sidebar:
         st.title("SymNote 🧠")
         st.caption("考えを残し、今日やることを決める。")
@@ -136,6 +148,63 @@ def render_sidebar() -> str:
         if not load_config().llm_api_key:
             st.info("AI機能はAPIキー未設定でも、メモ・タスク管理はそのまま使えます。")
     return selected
+
+
+def render_google_calendar_tab() -> None:
+    """Configure the optional, local-first Google Calendar integration."""
+    st.subheader("📆 Google Calendar 同期")
+    st.caption(
+        "SymNote の未完了タスク（期限あり）を Google Calendar に自動同期します。"
+        "オフライン時の変更は端末内に保留され、次回に再試行されます。"
+    )
+    config = load_config()
+    st.write(f"対象カレンダー: `{config.google_calendar_id}`")
+    st.write(
+        f"通知: 期限日 {config.google_calendar_deadline_hour:02d}:00 の Google Calendar "
+        f"ポップアップ通知（{config.google_calendar_reminder_minutes} 分前）"
+    )
+    st.caption(
+        f"期限は日付のみのため、期限日の {config.google_calendar_deadline_hour:02d}:00 から 30 分の予定として登録されます。端末で通知を受け取るには、"
+        "Google Calendar アプリ／ブラウザ側で通知を許可してください。"
+    )
+
+    if not google_calendar_connected():
+        st.info(
+            "未接続です。Google Cloud で Calendar API を有効にし、Desktop OAuth クライアントを作成後、"
+            "ダウンロードした JSON のパスを GOOGLE_CALENDAR_CLIENT_SECRET_PATH に設定してください。"
+        )
+        if st.button("Google Calendar に接続", type="primary"):
+            try:
+                connect_google_calendar(config)
+            except CalendarSetupError as exc:
+                st.error(str(exc))
+            except Exception:
+                st.error("接続に失敗しました。OAuth 設定を確認して再試行してください。")
+            else:
+                result = sync_pending_tasks(config)
+                if result.failed:
+                    st.warning(f"{result.pending} 件を同期保留にしました。次回起動時に再試行します。")
+                else:
+                    st.success(f"接続し、{result.synced} 件を同期しました。")
+        return
+
+    st.success("接続済みです。タスクの保存・編集・完了・削除は自動で同期されます。")
+    left, right = st.columns(2)
+    with left:
+        if st.button("今すぐ同期", type="primary"):
+            result = sync_pending_tasks(config)
+            if result.failed:
+                st.warning(f"{result.pending} 件を保留しました。ネットワークまたは認証を確認してください。")
+            else:
+                st.success(f"{result.synced} 件を同期しました。")
+    with right:
+        if st.button("接続を解除"):
+            try:
+                disconnect_google_calendar()
+            except Exception:
+                st.error("資格情報の削除に失敗しました。OS の資格情報ストアを確認してください。")
+            else:
+                st.success("この端末の Google Calendar 接続を解除しました。")
 
 
 def render_inbox_tab() -> None:
@@ -167,6 +236,11 @@ def render_inbox_tab() -> None:
 
         # tags = st.text_input("タグ（カンマ区切り・任意）", "") # Removed separate tags input
         
+        recurrence = st.selectbox(
+            "繰り返し",
+            ["なし", "毎日", "毎週", "隔週"],
+            help="完了すると次回分のタスクが自動で作成されます。",
+        )
         col_sub1, col_sub2 = st.columns(2)
         with col_sub1:
             submitted_memo = st.form_submit_button("メモとして保存", type="secondary")
@@ -195,7 +269,18 @@ def render_inbox_tab() -> None:
                 st.warning("タスク本文を入力してください。")
             else:
                 # ``date`` is the creation date; the selected date is the task deadline.
-                note_id = insert_task(raw_text=raw_text, tags=tags, due_date=due_date_str)
+                cadence = {"毎日": ("daily", 1), "毎週": ("weekly", 1), "隔週": ("weekly", 2)}
+                if recurrence in cadence:
+                    frequency, interval = cadence[recurrence]
+                    note_id = create_recurring_task(
+                        raw_text=raw_text,
+                        tags=tags,
+                        due_date=due_date_str or today.isoformat(),
+                        frequency=frequency,
+                        interval=interval,
+                    )
+                else:
+                    note_id = insert_task(raw_text=raw_text, tags=tags, due_date=due_date_str)
                 st.success(f"タスクを保存しました (ID: {note_id})")
 
     if st.button("AI でインボックスを整理", type="primary"):
@@ -239,6 +324,8 @@ def render_task_editor(task: Dict) -> None:
             pass
 
     st.markdown(f"**ID {task['id']}** | {task.get('ai_category', 'task')}")
+    if cadence := recurrence_label(task):
+        st.caption(f"繰り返し: {cadence}（完了時に次回分を作成）")
     
     with st.form(f"task_form_{task['id']}"):
         # Content Editor
@@ -287,6 +374,11 @@ def render_task_editor(task: Dict) -> None:
                 status=status,
             )
             st.success("更新しました。")
+
+    if task.get("recurrence_rule_id") and st.button("繰り返しを停止", key=f"stop_recurrence_{task['id']}"):
+        stop_task_recurrence(task["id"])
+        st.success("このタスク以降の繰り返しを停止しました。")
+        st.rerun()
 
     # Delete Confirmation Logic
     confirm_key = f"confirm_delete_task_{task['id']}"
@@ -415,8 +507,11 @@ def _display_tasks(tasks: List[Dict], title: str) -> None:
         btn_col1, btn_col2 = st.columns([1, 3])
         with btn_col1:
             if st.button("✔ 完了", key=f"done_btn_{task['id']}"):
-                update_item_fields(task["id"], status="done")
-                st.success("完了に更新しました。")
+                next_task_id = complete_task(task["id"])
+                if next_task_id:
+                    st.success("完了にし、次回分のタスクを作成しました。")
+                else:
+                    st.success("完了に更新しました。")
                 st.rerun()  # Ensure this is called in a valid Streamlit context
         with btn_col2:
             st.caption(f"status: {task.get('status', '')} | tags: {task.get('tags') or '-'}")
@@ -765,9 +860,14 @@ def main() -> None:
     """Streamlit で MVP のインボックス/タスク/今日/今週ビューを提供。"""
     st.set_page_config(page_title="SymNote", page_icon="🧠", layout="wide")
     init_db()
+    # Never block local work on the network: failed delivery remains queued in
+    # SQLite and is retried on a later app run.
+    if google_calendar_connected():
+        sync_pending_tasks()
     _apply_app_style()
     selected = render_sidebar()
     subtitles = {
+        "Google Calendar": "期限付きタスクを同期し、Google Calendar の通知を利用します。",
         "今日": "いま取り組むことを、迷わず片付けるための一覧です。",
         "インボックス": "思いついたことを、まずはそのまま残します。",
         "タスク整理": "優先度と期限を整えて、次の行動を決めます。",
@@ -779,7 +879,9 @@ def main() -> None:
     st.markdown(f"<h1 class='symnote-page-title'>{selected}</h1>", unsafe_allow_html=True)
     st.caption(subtitles[selected])
 
-    if selected == "インボックス":
+    if selected == "Google Calendar":
+        render_google_calendar_tab()
+    elif selected == "インボックス":
         render_inbox_tab()
     elif selected == "タスク整理":
         render_task_organizer_tab()

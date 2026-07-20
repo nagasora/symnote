@@ -6,6 +6,8 @@ from symnote.config import load_config
 from symnote.core.backup import create_backup
 from symnote.core.db import (
     delete_item,
+    complete_task,
+    create_recurring_task,
     fetch_inbox,
     fetch_tasks_for_today_view,
     fetch_weekly_review_sources,
@@ -88,7 +90,7 @@ def test_init_migrates_legacy_task_dates(monkeypatch, tmp_path) -> None:
     init_db()
 
     with sqlite3.connect(database) as check:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 5
         due_date = check.execute("SELECT due_date FROM items WHERE id = 1").fetchone()[0]
         assert due_date == "2026-07-20"
 
@@ -132,3 +134,44 @@ def test_weekly_sources_include_tasks_due_during_week(monkeypatch, tmp_path) -> 
     assert [row["raw_text"] for row in fetch_weekly_review_sources("2026-07-20", "2026-07-26")["tasks"]] == [
         "Created earlier, due this week"
     ]
+
+
+def test_task_changes_are_queued_for_calendar_sync(monkeypatch, tmp_path) -> None:
+    database = tmp_path / "calendar-outbox.db"
+    monkeypatch.setenv("DB_PATH", str(database))
+    init_db()
+    task_id = insert_task("Calendar task", due_date="2026-07-20")
+
+    with sqlite3.connect(database) as check:
+        assert check.execute(
+            "SELECT operation FROM calendar_sync_outbox WHERE task_id = ?", (task_id,)
+        ).fetchone()[0] == "upsert"
+
+    delete_item(task_id)
+    with sqlite3.connect(database) as check:
+        assert check.execute(
+            "SELECT operation FROM calendar_sync_outbox WHERE task_id = ?", (task_id,)
+        ).fetchone()[0] == "delete"
+
+
+def test_recurring_task_creates_the_next_occurrence_on_completion(monkeypatch, tmp_path) -> None:
+    database = tmp_path / "recurrence.db"
+    monkeypatch.setenv("DB_PATH", str(database))
+    init_db()
+    task_id = create_recurring_task(
+        "Daily review", due_date="2026-07-20", frequency="daily", tags="review"
+    )
+
+    next_id = complete_task(task_id)
+    assert next_id is not None
+    with sqlite3.connect(database) as check:
+        completed, next_task = check.execute(
+            "SELECT status, due_date FROM items WHERE id IN (?, ?) ORDER BY id", (task_id, next_id)
+        ).fetchall()
+        assert completed == ("done", "2026-07-20")
+        assert next_task == ("inbox", "2026-07-21")
+        queued = check.execute(
+            "SELECT COUNT(*) FROM calendar_sync_outbox"
+        ).fetchone()[0]
+        assert queued == 2
+    assert complete_task(task_id) is None
