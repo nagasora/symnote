@@ -90,9 +90,10 @@ def test_init_migrates_legacy_task_dates(monkeypatch, tmp_path) -> None:
     init_db()
 
     with sqlite3.connect(database) as check:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 6
         due_date = check.execute("SELECT due_date FROM items WHERE id = 1").fetchone()[0]
         assert due_date == "2026-07-20"
+        assert check.execute("SELECT operation FROM calendar_sync_outbox").fetchone()[0] == "upsert"
 
 
 def test_connection_configuration_and_backup(monkeypatch, tmp_path) -> None:

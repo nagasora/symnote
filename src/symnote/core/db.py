@@ -43,7 +43,7 @@ def get_connection() -> sqlite3.Connection:
 def _migrate_db(conn: sqlite3.Connection) -> None:
     """必要なカラムが足りない場合に ALTER TABLE で追加する簡易マイグレーション。"""
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if current > 5:
+    if current > 6:
         raise RuntimeError("This database requires a newer version of SymNote.")
 
     if current < 1:
@@ -108,6 +108,22 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
             "ON items(recurrence_rule_id, due_date) WHERE recurrence_rule_id IS NOT NULL"
         )
         conn.execute("PRAGMA user_version = 5")
+        current = 5
+    if current < 6:
+        # Calendar sync was added after tasks already existed in local
+        # databases.  Seed those tasks once so connecting Calendar does not
+        # appear to succeed while silently syncing nothing.
+        conn.execute(
+            """
+            INSERT INTO calendar_sync_outbox (task_id, operation, changed_at)
+            SELECT id, 'upsert', ?
+            FROM items
+            WHERE kind = 'task'
+            ON CONFLICT(task_id) DO NOTHING
+            """,
+            (dt.datetime.now().isoformat(timespec="seconds"),),
+        )
+        conn.execute("PRAGMA user_version = 6")
 
 
 def init_db() -> None:

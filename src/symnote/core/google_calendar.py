@@ -169,6 +169,11 @@ def _mark_complete(task_id: int, event_id: str | None, operation: str) -> None:
         conn.execute("DELETE FROM calendar_sync_outbox WHERE task_id = ?", (task_id,))
 
 
+def _is_not_found(error: Exception) -> bool:
+    """Return whether a Google API error means its remote event is gone."""
+    return getattr(getattr(error, "resp", None), "status", None) == 404
+
+
 def sync_pending_tasks(
     config: AppConfig | None = None,
     service_factory: Callable[[], Any] | None = None,
@@ -204,9 +209,20 @@ def sync_pending_tasks(
                             raise
                 _mark_complete(task_id, None, "delete")
             elif event_id:
-                service.events().update(
-                    calendarId=config.google_calendar_id, eventId=event_id, body=payload
-                ).execute()
+                try:
+                    service.events().update(
+                        calendarId=config.google_calendar_id, eventId=event_id, body=payload
+                    ).execute()
+                except Exception as exc:
+                    # A Calendar event may have been removed outside SymNote.
+                    # Recreate it and replace the stale local mapping instead
+                    # of leaving this task permanently queued for retry.
+                    if not _is_not_found(exc):
+                        raise
+                    event = service.events().insert(
+                        calendarId=config.google_calendar_id, body=payload
+                    ).execute()
+                    event_id = event["id"]
                 _mark_complete(task_id, event_id, "upsert")
             else:
                 event = service.events().insert(calendarId=config.google_calendar_id, body=payload).execute()
