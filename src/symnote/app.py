@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 import datetime as dt
 import json
 
@@ -46,6 +46,7 @@ from symnote.core.mindmap import (
     save_mindmap_tree,
 )
 from symnote.calendar_app import render_calendar_tab
+from symnote.config import load_config
 from symnote.core.doc_loader import extract_text_from_file
 
 
@@ -62,6 +63,79 @@ def _due_priority_tuple(task: Dict) -> Tuple[dt.date, float, int]:
     energy: Energy = task.get("energy") or "mid"
     score = priority_score(importance, urgency, effort, energy)
     return (due, -score, task["id"])
+
+
+def _task_overview(tasks: List[Dict], today: dt.date | None = None) -> Dict[str, int]:
+    """Return small, display-oriented task counts without changing task data."""
+    today = today or dt.date.today()
+    overview = {"active": 0, "today": 0, "overdue": 0, "done": 0}
+    for task in tasks:
+        if task.get("status") == "done":
+            overview["done"] += 1
+            continue
+        overview["active"] += 1
+        due_str = task.get("due_date")
+        try:
+            due = dt.date.fromisoformat(due_str) if due_str else None
+        except ValueError:
+            due = None
+        if due and due < today:
+            overview["overdue"] += 1
+        if task.get("status") == "today" or due == today:
+            overview["today"] += 1
+    return overview
+
+
+def _apply_app_style() -> None:
+    """Keep the personal workspace calm and make primary actions easy to spot."""
+    st.markdown(
+        """
+        <style>
+          .block-container { max-width: 1180px; padding-top: 1.6rem; padding-bottom: 3rem; }
+          [data-testid="stSidebar"] { border-right: 1px solid rgba(128, 128, 128, .18); }
+          [data-testid="stMetric"] { padding: .55rem .15rem; }
+          .symnote-kicker { color: #6b7280; font-size: .9rem; margin-bottom: .25rem; }
+          .symnote-page-title { margin: 0 0 .25rem; font-size: 1.7rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_sidebar() -> str:
+    """Render the persistent navigation and a compact personal task snapshot."""
+    all_tasks = fetch_tasks(limit=500)
+    overview = _task_overview(all_tasks)
+    pages = {
+        "今日": "📌 今日",
+        "インボックス": "📝 インボックス",
+        "タスク整理": "🗂️ タスク整理",
+        "カレンダー": "🗓️ カレンダー",
+        "アイデア整理": "💡 アイデア整理",
+        "ドキュメント分析": "📄 ドキュメント分析",
+    }
+    with st.sidebar:
+        st.title("SymNote 🧠")
+        st.caption("考えを残し、今日やることを決める。")
+        selected = st.radio(
+            "画面",
+            list(pages),
+            format_func=pages.get,
+            label_visibility="collapsed",
+        )
+        st.divider()
+        st.caption("タスクの状況")
+        first, second = st.columns(2)
+        first.metric("今日", overview["today"])
+        second.metric("期限切れ", overview["overdue"])
+        first, second = st.columns(2)
+        first.metric("未完了", overview["active"])
+        second.metric("完了", overview["done"])
+        st.divider()
+        st.caption("データはこの端末の SQLite に保存されています。")
+        if not load_config().llm_api_key:
+            st.info("AI機能はAPIキー未設定でも、メモ・タスク管理はそのまま使えます。")
+    return selected
 
 
 def render_inbox_tab() -> None:
@@ -238,17 +312,44 @@ def render_task_editor(task: Dict) -> None:
 
 def render_task_organizer_tab() -> None:
     st.subheader("🗂️ タスク整理")
-    
-    filter_status = st.radio(
-        "表示フィルタ",
-        ["未完了", "完了"],
-        horizontal=True,
-    )
-    
+    st.caption("キーワードや期限で絞り込み、必要なタスクだけを開いて編集できます。")
+    filter_col, search_col, due_col = st.columns([1, 2, 1])
+    with filter_col:
+        filter_status = st.radio("状態", ["未完了", "完了"], horizontal=True)
+    with search_col:
+        query = st.text_input("検索", placeholder="タイトル・詳細・タグを検索")
+    with due_col:
+        due_filter = st.selectbox("期限", ["すべて", "期限切れ", "今日", "今週", "期限なし"])
+
     target_statuses = ["inbox", "today", "week"] if filter_status == "未完了" else ["done"]
     tasks = fetch_tasks(statuses=target_statuses, limit=200)
+    today = dt.date.today()
+    week_end = today + dt.timedelta(days=6)
+
+    def matches_filter(task: Dict) -> bool:
+        haystack = " ".join(
+            str(task.get(field) or "") for field in ("tags", "raw_text", "ai_category")
+        ).lower()
+        if query.strip() and query.strip().lower() not in haystack:
+            return False
+        due_str = task.get("due_date")
+        try:
+            due = dt.date.fromisoformat(due_str) if due_str else None
+        except ValueError:
+            due = None
+        if due_filter == "期限切れ":
+            return bool(due and due < today)
+        if due_filter == "今日":
+            return due == today
+        if due_filter == "今週":
+            return bool(due and today <= due <= week_end)
+        if due_filter == "期限なし":
+            return due is None
+        return True
+
+    tasks = [task for task in tasks if matches_filter(task)]
     if not tasks:
-        st.info("AI でメモをタスクに分類するとここに表示されます。")
+        st.info("条件に合うタスクはありません。条件を変えるか、インボックスからタスクを追加してください。")
         return
 
     # Group tasks by deadline. ``date`` remains the immutable creation date.
@@ -324,25 +425,33 @@ def _display_tasks(tasks: List[Dict], title: str) -> None:
 
 def render_today_tab() -> None:
     today_str = dt.date.today().isoformat()
-    
-    # AI Suggestion (using candidates from inbox/week/today)
     candidate_tasks = fetch_tasks(statuses=["today", "week", "inbox"], limit=300)
+    overview = _task_overview(fetch_tasks(limit=500))
+    metrics = st.columns(3)
+    metrics[0].metric("今日取り組む", overview["today"])
+    metrics[1].metric("期限切れ", overview["overdue"])
+    metrics[2].metric("未完了", overview["active"])
+    if overview["overdue"]:
+        st.warning("期限切れのタスクがあります。まずは期限を見直すか、完了にしてください。")
+
+    # AI Suggestion (using candidates from inbox/week/today)
     suggestions = suggest_today_tasks(candidate_tasks, dt.date.today())
     if suggestions:
         st.subheader("🤖 AI 推薦: 今日のトップ3（理由付き）")
         task_lookup = {task["id"]: task for task in candidate_tasks}
         for idx, suggestion in enumerate(suggestions, start=1):
-            st.markdown(f"**{idx}.** {suggestion.raw_text}")
-            status = (task_lookup.get(suggestion.task_id, {}).get("status") or "inbox").lower()
-            meta = f"理由: {suggestion.reason}"
-            if suggestion.due:
-                meta += f" / 期限: {suggestion.due}"
-            st.caption(meta)
-            if status != "today":
-                if st.button("今日のタスクに追加", key=f"suggest_to_today_{suggestion.task_id}"):
-                    update_item_fields(suggestion.task_id, status="today")
-                    st.success("今日のタスクに移動しました。")
-                    st.rerun()
+            with st.container(border=True):
+                st.markdown(f"**{idx}. {suggestion.raw_text}**")
+                status = (task_lookup.get(suggestion.task_id, {}).get("status") or "inbox").lower()
+                meta = f"理由: {suggestion.reason}"
+                if suggestion.due:
+                    meta += f" / 期限: {suggestion.due}"
+                st.caption(meta)
+                if status != "today":
+                    if st.button("今日のタスクに追加", key=f"suggest_to_today_{suggestion.task_id}"):
+                        update_item_fields(suggestion.task_id, status="today")
+                        st.success("今日のタスクに移動しました。")
+                        st.rerun()
         st.divider()
 
     # Today's Tasks (including overdue)
@@ -647,32 +756,40 @@ def render_doc_analysis_tab() -> None:
                 with col1:
                     st.write(task_text)
                 with col2:
-                    if st.button("インボックスに追加", key=f"add_task_{i}"):
-                        insert_memo(raw_text=task_text, tags="from_pdf")
-                        st.success(f"タスク「{task_text[:30]}...」をインボックスに追加しました。")
+                    if st.button("タスクとして保存", key=f"add_task_{i}"):
+                        insert_task(raw_text=task_text, tags="from_document")
+                        st.success(f"タスク「{task_text[:30]}...」を保存しました。")
 
 
 def main() -> None:
     """Streamlit で MVP のインボックス/タスク/今日/今週ビューを提供。"""
-    init_db()
     st.set_page_config(page_title="SymNote", page_icon="🧠", layout="wide")
-    st.title("SymNote 🧠")
-    st.caption("思考インボックスとタスク優先づけのための入り口")
+    init_db()
+    _apply_app_style()
+    selected = render_sidebar()
+    subtitles = {
+        "今日": "いま取り組むことを、迷わず片付けるための一覧です。",
+        "インボックス": "思いついたことを、まずはそのまま残します。",
+        "タスク整理": "優先度と期限を整えて、次の行動を決めます。",
+        "カレンダー": "期限と記録を、月単位で振り返ります。",
+        "アイデア整理": "資料やメモから、考えを行動に変えます。",
+        "ドキュメント分析": "ファイルから要点とタスク候補を取り出します。",
+    }
+    st.markdown(f"<div class='symnote-kicker'>SymNote / {selected}</div>", unsafe_allow_html=True)
+    st.markdown(f"<h1 class='symnote-page-title'>{selected}</h1>", unsafe_allow_html=True)
+    st.caption(subtitles[selected])
 
-    tabs = ["インボックス", "タスク整理", "今日ビュー", "カレンダー", "アイデア整理", "ドキュメント分析"]
-    tab_inbox, tab_tasks, tab_today, tab_calendar, tab_idea, tab_doc_analysis = st.tabs(tabs)
-
-    with tab_inbox:
+    if selected == "インボックス":
         render_inbox_tab()
-    with tab_tasks:
+    elif selected == "タスク整理":
         render_task_organizer_tab()
-    with tab_today:
+    elif selected == "今日":
         render_today_tab()
-    with tab_calendar:
+    elif selected == "カレンダー":
         render_calendar_tab()
-    with tab_idea:
+    elif selected == "アイデア整理":
         render_idea_tab()
-    with tab_doc_analysis:
+    else:
         render_doc_analysis_tab()
 
 
