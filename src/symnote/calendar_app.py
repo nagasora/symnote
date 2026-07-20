@@ -36,7 +36,7 @@ def render_calendar_tab() -> None:
         st.session_state.cal_month = date.today().month
 
     # Navigation
-    col_prev, col_curr, col_next = st.columns([1, 3, 1])
+    col_prev, col_today, col_curr, col_next = st.columns([1, 1, 3, 1])
     with col_prev:
         if st.button("← 前月"):
             if st.session_state.cal_month == 1:
@@ -44,6 +44,12 @@ def render_calendar_tab() -> None:
                 st.session_state.cal_year -= 1
             else:
                 st.session_state.cal_month -= 1
+            st.rerun()
+    with col_today:
+        if st.button("今月"):
+            st.session_state.cal_year = date.today().year
+            st.session_state.cal_month = date.today().month
+            st.session_state["selected_calendar_date"] = date.today().isoformat()
             st.rerun()
     with col_curr:
         st.markdown(f"<h3 style='text-align: center;'>{st.session_state.cal_year}年 {st.session_state.cal_month}月</h3>", unsafe_allow_html=True)
@@ -93,11 +99,17 @@ def render_calendar_tab() -> None:
                     d_obj = date(year, month, day)
                     d_str = d_obj.isoformat()
                     
-                    # Style
+                    is_selected = d_str == st.session_state.get("selected_calendar_date")
                     is_today = d_obj == date.today()
-                    day_style = "**" if is_today else ""
-                    
-                    st.markdown(f"{day_style}{day}{day_style}")
+                    day_label = f"● {day}" if is_today else str(day)
+                    if st.button(
+                        day_label,
+                        key=f"view_{d_str}",
+                        type="primary" if is_selected else "secondary",
+                        use_container_width=True,
+                    ):
+                        st.session_state["selected_calendar_date"] = d_str
+                        st.rerun()
                     
                     c = counts.get(d_str, {"task": 0, "memo": 0, "due": 0})
                     if c["task"] > 0 or c["memo"] > 0 or c["due"] > 0:
@@ -110,9 +122,6 @@ def render_calendar_tab() -> None:
                             info.append(f"M:{c['memo']}")
                         st.caption(" ".join(info))
                     
-                    if st.button("詳細", key=f"view_{d_str}"):
-                        st.session_state["selected_calendar_date"] = d_str
-
     st.divider()
 
     # Details Section
