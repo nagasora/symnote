@@ -56,6 +56,23 @@ def test_event_payload_is_all_day_and_has_popup_reminder() -> None:
     assert payload["reminders"]["overrides"] == [{"method": "popup", "minutes": 30}]
 
 
+def test_event_payload_uses_the_task_due_time_when_present() -> None:
+    payload = task_event_payload(
+        {
+            "id": 3,
+            "tags": "Ship",
+            "raw_text": "Ship release",
+            "due_date": "2026-07-20",
+            "due_time": "14:45",
+            "status": "week",
+        },
+        30,
+    )
+    assert payload is not None
+    assert payload["start"]["dateTime"] == "2026-07-20T14:45:00"
+    assert payload["end"]["dateTime"] == "2026-07-20T15:15:00"
+
+
 def test_sync_creates_then_deletes_mapped_event(monkeypatch, tmp_path) -> None:
     database = tmp_path / "calendar.db"
     monkeypatch.setenv("DB_PATH", str(database))

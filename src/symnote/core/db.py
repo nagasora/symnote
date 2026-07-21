@@ -43,7 +43,7 @@ def get_connection() -> sqlite3.Connection:
 def _migrate_db(conn: sqlite3.Connection) -> None:
     """必要なカラムが足りない場合に ALTER TABLE で追加する簡易マイグレーション。"""
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if current > 6:
+    if current > 7:
         raise RuntimeError("This database requires a newer version of SymNote.")
 
     if current < 1:
@@ -98,6 +98,7 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
               id INTEGER PRIMARY KEY,
               frequency TEXT NOT NULL CHECK(frequency IN ('daily', 'weekly')),
               interval_days INTEGER NOT NULL CHECK(interval_days > 0),
+              end_date TEXT,
               active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
               created_at TEXT NOT NULL
             )
@@ -124,6 +125,19 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
             (dt.datetime.now().isoformat(timespec="seconds"),),
         )
         conn.execute("PRAGMA user_version = 6")
+        current = 6
+    if current < 7:
+        # Keep the day and time separate so existing date-only tasks remain
+        # valid while new tasks can carry an exact local deadline.
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
+        if "due_time" not in columns:
+            conn.execute("ALTER TABLE items ADD COLUMN due_time TEXT")
+        rule_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(task_recurrence_rules)")
+        }
+        if "end_date" not in rule_columns:
+            conn.execute("ALTER TABLE task_recurrence_rules ADD COLUMN end_date TEXT")
+        conn.execute("PRAGMA user_version = 7")
 
 
 def init_db() -> None:
@@ -136,6 +150,7 @@ def init_db() -> None:
               created_at TEXT,
               date TEXT,
               due_date TEXT,
+              due_time TEXT,
               kind TEXT,              -- 'memo' | 'task' | 'weekly_review'
               raw_text TEXT,
               ai_category TEXT,       -- 'task' | 'idea' | 'someday'
@@ -200,6 +215,7 @@ def insert_item(
     date_str: Optional[str] = None,
     tags: str = "",
     due_date: Optional[str] = None,
+    due_time: Optional[str] = None,
     status: str = "inbox",
     ai_category: Optional[str] = None,
     importance: Optional[int] = None,
@@ -210,22 +226,28 @@ def insert_item(
     """汎用的なアイテム登録。"""
     if not date_str:
         date_str = dt.date.today().isoformat()
+    if due_time:
+        try:
+            due_time = dt.time.fromisoformat(due_time).strftime("%H:%M")
+        except ValueError as exc:
+            raise ValueError("due_time must be an ISO time") from exc
     now = dt.datetime.now().isoformat(timespec="seconds")
 
     with connection() as conn, conn:
         cur = conn.execute(
             """
             INSERT INTO items (
-              created_at, date, due_date, kind, raw_text,
+              created_at, date, due_date, due_time, kind, raw_text,
               ai_category, importance, urgency, effort, energy,
               status, tags, embedding
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
             (
                 now,
                 date_str,
                 due_date,
+                due_time,
                 kind,
                 raw_text,
                 ai_category,
@@ -243,9 +265,9 @@ def insert_item(
         return item_id
 
 
-def insert_memo(raw_text: str, date_str: Optional[str] = None, tags: str = "", due_date: Optional[str] = None) -> int:
+def insert_memo(raw_text: str, date_str: Optional[str] = None, tags: str = "") -> int:
     """インボックス用のメモを登録する。"""
-    return insert_item(kind="memo", raw_text=raw_text, date_str=date_str, tags=tags, due_date=due_date)
+    return insert_item(kind="memo", raw_text=raw_text, date_str=date_str, tags=tags)
 
 
 def insert_task(
@@ -253,6 +275,7 @@ def insert_task(
     date_str: Optional[str] = None,
     tags: str = "",
     due_date: Optional[str] = None,
+    due_time: Optional[str] = None,
     status: str = "inbox",
     recurrence_rule_id: Optional[int] = None,
 ) -> int:
@@ -263,6 +286,7 @@ def insert_task(
         date_str=date_str,
         tags=tags,
         due_date=due_date,
+        due_time=due_time,
         status=status,
         ai_category="task",
         importance=3,
@@ -284,31 +308,42 @@ def create_recurring_task(
     interval: int = 1,
     tags: str = "",
     status: str = "inbox",
+    due_time: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> int:
     """Create the first occurrence of a daily, weekly, or biweekly task."""
     if frequency not in {"daily", "weekly"} or interval < 1:
         raise ValueError("Unsupported recurrence rule")
-    dt.date.fromisoformat(due_date)
+    start_date = dt.date.fromisoformat(due_date)
+    if due_time:
+        try:
+            due_time = dt.time.fromisoformat(due_time).strftime("%H:%M")
+        except ValueError as exc:
+            raise ValueError("due_time must be an ISO time") from exc
+    if end_date:
+        recurrence_end = dt.date.fromisoformat(end_date)
+        if recurrence_end < start_date:
+            raise ValueError("end_date must not be before due_date")
     now = dt.datetime.now().isoformat(timespec="seconds")
     interval_days = interval if frequency == "daily" else interval * 7
     with connection() as conn, conn:
         rule = conn.execute(
             """
-            INSERT INTO task_recurrence_rules (frequency, interval_days, created_at)
-            VALUES (?, ?, ?)
+            INSERT INTO task_recurrence_rules (frequency, interval_days, end_date, created_at)
+            VALUES (?, ?, ?, ?)
             """,
-            (frequency, interval_days, now),
+            (frequency, interval_days, end_date, now),
         )
         rule_id = int(rule.lastrowid)
         cur = conn.execute(
             """
             INSERT INTO items (
-              created_at, date, due_date, kind, raw_text, ai_category,
+              created_at, date, due_date, due_time, kind, raw_text, ai_category,
               importance, urgency, effort, energy, status, tags, embedding,
               recurrence_rule_id
-            ) VALUES (?, ?, ?, 'task', ?, 'task', 3, 3, NULL, NULL, ?, ?, NULL, ?)
+            ) VALUES (?, ?, ?, ?, 'task', ?, 'task', 3, 3, NULL, NULL, ?, ?, NULL, ?)
             """,
-            (now, dt.date.today().isoformat(), due_date, raw_text, status, tags, rule_id),
+            (now, dt.date.today().isoformat(), due_date, due_time, raw_text, status, tags, rule_id),
         )
         task_id = int(cur.lastrowid)
         _queue_calendar_sync(conn, task_id, "upsert")
@@ -321,12 +356,16 @@ def recurrence_label(task: ItemRow) -> Optional[str]:
     if not interval_days:
         return None
     if interval_days == 1:
-        return "daily"
-    if interval_days == 7:
-        return "weekly"
-    if interval_days == 14:
-        return "biweekly"
-    return f"every {interval_days} days"
+        label = "毎日"
+    elif interval_days == 7:
+        label = "毎週"
+    elif interval_days == 14:
+        label = "隔週"
+    else:
+        label = f"{interval_days}日ごと"
+    if end_date := task.get("recurrence_end_date"):
+        return f"{label}（{end_date}まで）"
+    return label
 
 
 def complete_task(item_id: int) -> Optional[int]:
@@ -341,7 +380,7 @@ def complete_task(item_id: int) -> Optional[int]:
         if rule_id is None:
             return None
         rule = conn.execute(
-            "SELECT interval_days FROM task_recurrence_rules WHERE id = ? AND active = 1",
+            "SELECT interval_days, end_date FROM task_recurrence_rules WHERE id = ? AND active = 1",
             (rule_id,),
         ).fetchone()
         if not rule:
@@ -351,6 +390,9 @@ def complete_task(item_id: int) -> Optional[int]:
         except ValueError:
             base_due = dt.date.today()
         next_due = (base_due + dt.timedelta(days=rule["interval_days"])).isoformat()
+        if rule["end_date"] and next_due > rule["end_date"]:
+            conn.execute("UPDATE task_recurrence_rules SET active = 0 WHERE id = ?", (rule_id,))
+            return None
         existing = conn.execute(
             "SELECT id FROM items WHERE recurrence_rule_id = ? AND due_date = ?",
             (rule_id, next_due),
@@ -361,15 +403,16 @@ def complete_task(item_id: int) -> Optional[int]:
         cur = conn.execute(
             """
             INSERT INTO items (
-              created_at, date, due_date, kind, raw_text, ai_category,
+              created_at, date, due_date, due_time, kind, raw_text, ai_category,
               importance, urgency, effort, energy, status, tags, embedding,
               recurrence_rule_id
-            ) VALUES (?, ?, ?, 'task', ?, ?, ?, ?, ?, ?, 'inbox', ?, NULL, ?)
+            ) VALUES (?, ?, ?, ?, 'task', ?, ?, ?, ?, ?, ?, 'inbox', ?, NULL, ?)
             """,
             (
                 now,
                 dt.date.today().isoformat(),
                 next_due,
+                task["due_time"],
                 task["raw_text"],
                 task["ai_category"],
                 task["importance"],
@@ -440,15 +483,31 @@ def fetch_inbox(limit: int = 50) -> List[ItemRow]:
         return [dict(r) for r in cur.fetchall()]
 
 
+def fetch_memos(limit: int = 100) -> List[ItemRow]:
+    """Return standalone memos without exposing the internal inbox status."""
+    with connection() as conn:
+        cur = conn.execute(
+            """
+            SELECT id, created_at, date, raw_text, tags, ai_category
+            FROM items
+            WHERE kind = 'memo'
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
 def fetch_tasks(
     statuses: Optional[Sequence[str]] = None,
     limit: int = 200,
 ) -> List[ItemRow]:
     """タスク(kind='task')を取得。status でフィルタ可能。"""
     query = [
-        "SELECT i.id, i.created_at, i.date, i.due_date, i.raw_text, i.tags, i.ai_category,",
+        "SELECT i.id, i.created_at, i.date, i.due_date, i.due_time, i.raw_text, i.tags, i.ai_category,",
         "i.importance, i.urgency, i.effort, i.energy, i.status, i.recurrence_rule_id,",
-        "r.interval_days AS recurrence_interval_days",
+        "r.interval_days AS recurrence_interval_days, r.end_date AS recurrence_end_date",
         "FROM items AS i LEFT JOIN task_recurrence_rules AS r ON r.id = i.recurrence_rule_id",
         "WHERE i.kind = 'task'",
     ]
@@ -596,6 +655,7 @@ def update_item_fields(item_id: int, **fields: Any) -> None:
         "raw_text",
         "date",
         "due_date",
+        "due_time",
     }
     updates: List[str] = []
     params: List[Any] = []

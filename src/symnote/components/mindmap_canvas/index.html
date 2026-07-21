@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: sans-serif; background: #20252b; color: #f3f5f7; }
+    #shell { border: 1px solid #353d47; border-radius: 18px; overflow: hidden; }
+    #toolbar { display: flex; justify-content: space-between; gap: 16px; padding: 12px 16px; border-bottom: 1px solid #353d47; font-size: 12px; color: #c6d0dd; }
+    #legend { color: #95a3b6; }
+    #canvas { position: relative; overflow: auto; min-height: 440px; background: radial-gradient(circle at 47% 45%, #29313a, #20252b 48%, #1b2025); }
+    #stage { position: relative; min-width: 920px; }
+    svg { position: absolute; inset: 0; pointer-events: none; }
+    .edge { fill: none; stroke: #8a93e8; stroke-width: 1.5; opacity: .82; }
+    .edge.active { stroke: #64d6b8; stroke-width: 2.3; opacity: 1; }
+    .node { position: absolute; width: 175px; padding: 9px 11px; overflow-wrap: anywhere; border: 1px solid rgba(255,255,255,.05); border-radius: 6px; box-shadow: 0 2px 7px rgba(0,0,0,.2); color: #f3f5f7; font-size: 12px; font-weight: 600; line-height: 1.25; text-align: left; cursor: pointer; }
+    .node:hover { filter: brightness(1.18); box-shadow: 0 0 0 2px rgba(212,222,255,.55); }
+    .root { background: #4c536f; } .idea { background: #414a55; } .task { background: #31544c; }
+    .note { background: #5a4c36; } .detail, .link { background: #374250; }
+    .selected { box-shadow: 0 0 0 3px #f6c85f, 0 5px 15px rgba(0,0,0,.35); }
+    .focus { box-shadow: 0 0 0 2px #64d6b8, 0 3px 10px rgba(0,0,0,.28); }
+  </style>
+</head>
+<body>
+  <div id="shell"><div id="toolbar"><span>マインドマップ</span><span id="legend"></span></div><div id="canvas"><div id="stage"><svg id="edges"></svg></div></div></div>
+  <script>
+    const stage = document.getElementById('stage');
+    const edges = document.getElementById('edges');
+    const canvas = document.getElementById('canvas');
+    const legend = document.getElementById('legend');
+    let latestArgs = {};
+    const componentInstanceId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+    let eventCounter = 0;
+
+    function send(type, nodeId) {
+      eventCounter += 1;
+      window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setComponentValue', value: { type, node_id: nodeId, event_id: `${componentInstanceId}:${eventCounter}` } }, '*');
+    }
+    function frameHeight(height) {
+      window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setFrameHeight', height }, '*');
+    }
+    function render(data) {
+      latestArgs = data || {};
+      const nodes = latestArgs.nodes || [];
+      const scale = latestArgs.scale || 1;
+      const width = latestArgs.width || 920;
+      const height = latestArgs.height || 440;
+      const focus = new Set(latestArgs.focus_ids || []);
+      const nodeById = new Map(nodes.map(n => [n.id, n]));
+      stage.replaceChildren(edges);
+      edges.replaceChildren();
+      stage.style.width = width + 'px'; stage.style.height = height + 'px';
+      edges.setAttribute('width', width); edges.setAttribute('height', height);
+      legend.textContent = `クリック: 選択 · ダブルクリック/右クリック/Ctrl+Enter: 展開・折りたたみ · 縮尺 ${Math.round(scale * 100)}%`;
+      for (const node of nodes) {
+        for (const childId of node.children) {
+          const child = nodeById.get(childId); if (!child) continue;
+          const startX = node.x + 172 * scale, endX = child.x, mid = (startX + endX) / 2;
+          const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+          path.setAttribute('class', `edge ${focus.has(childId) ? 'active' : ''}`);
+          path.setAttribute('d', `M ${startX} ${node.y} C ${mid} ${node.y}, ${mid} ${child.y}, ${endX} ${child.y}`);
+          edges.appendChild(path);
+        }
+      }
+      for (const node of nodes) {
+        const button = document.createElement('button');
+        button.className = `node ${node.kind} ${node.id === latestArgs.selected_id ? 'selected' : ''} ${focus.has(node.id) ? 'focus' : ''}`;
+        button.style.left = node.x + 'px'; button.style.top = node.y + 'px';
+        button.style.transform = `translateY(-50%) scale(${scale})`; button.style.transformOrigin = 'left center';
+        button.title = node.body || node.title;
+        button.textContent = `${node.has_children ? (node.collapsed ? '▸ ' : '▾ ') : ''}${node.title}`;
+        button.setAttribute('aria-label', node.has_children ? `${node.title}。Ctrl+Enterで展開または折りたたみ` : node.title);
+        if (node.has_children) button.setAttribute('aria-expanded', String(!node.collapsed));
+        let clickTimer = null;
+        button.onclick = () => {
+          clearTimeout(clickTimer);
+          clickTimer = setTimeout(() => send('select', node.id), 240);
+        };
+        button.ondblclick = event => {
+          event.preventDefault();
+          clearTimeout(clickTimer);
+          if (node.has_children) send('toggle', node.id);
+        };
+        button.oncontextmenu = event => {
+          event.preventDefault();
+          clearTimeout(clickTimer);
+          if (node.has_children) send('toggle', node.id);
+        };
+        button.onkeydown = event => {
+          if (event.ctrlKey && event.key === 'Enter' && node.has_children) {
+            event.preventDefault();
+            clearTimeout(clickTimer);
+            send('toggle', node.id);
+          }
+        };
+        stage.appendChild(button);
+      }
+      canvas.style.minHeight = Math.max(440, height) + 'px';
+      frameHeight(Math.max(470, height + 52));
+    }
+    window.addEventListener('message', event => {
+      if (event.data && event.data.type === 'streamlit:render') render(event.data.args);
+    });
+    window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:componentReady', apiVersion: 1 }, '*');
+  </script>
+</body>
+</html>

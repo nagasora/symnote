@@ -347,6 +347,29 @@ def brainstorm_ideas(context: str, user_query: str) -> List[str]:
         return []
 
 
+def _mindmap_model() -> genai.GenerativeModel:
+    """Create the configured model or fail before starting a network request."""
+    config = load_config()
+    if not config.llm_api_key:
+        raise RuntimeError("LLM_API_KEYが設定されていません。設定後にもう一度お試しください。")
+    genai.configure(api_key=config.llm_api_key)
+    generation_config = genai.GenerationConfig(max_output_tokens=config.max_tokens)
+    return genai.GenerativeModel(config.llm_model, generation_config=generation_config)
+
+
+def _parse_mindmap_json(content: str) -> Any:
+    """Parse a JSON-only model response with an optional Markdown fence."""
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("AIから空の応答が返されました。")
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) < 3 or lines[-1].strip() != "```":
+            raise ValueError("AI応答のJSONコードブロックが閉じられていません。")
+        text = "\n".join(lines[1:-1]).strip()
+    return json.loads(text)
+
+
 def generate_initial_mindmap(source_text: str) -> Dict[str, Any]:
     """
     Generate an initial mind map structure from source text.
@@ -362,10 +385,7 @@ def generate_initial_mindmap(source_text: str) -> Dict[str, Any]:
         ]
     }
     """
-    config = load_config()
-    genai.configure(api_key=config.llm_api_key)
-    generation_config = genai.GenerationConfig(max_output_tokens=config.max_tokens)
-    model = genai.GenerativeModel(config.llm_model, generation_config=generation_config)
+    model = _mindmap_model()
 
     prompt = f"""
     以下のテキストを分析し、マインドマップの初期構造を生成してください。
@@ -391,33 +411,19 @@ def generate_initial_mindmap(source_text: str) -> Dict[str, Any]:
              {{ "kind": "task", "title": "具体的なタスク", "body": "詳細" }},
              {{ "kind": "note", "title": "関連メモ", "body": "詳細" }}
           ]
-        }},
-        ...
+        }}
       ]
     }}
     """
 
     try:
-        response = model.generate_content(prompt)
-        content = response.text
-        # Robust JSON extraction
-        content = content.strip()
-        if content.startswith("```"):
-            # Remove first line (```json or ```)
-            content = content.split("\n", 1)[1]
-            # Remove last line (```)
-            if content.endswith("```"):
-                content = content.rsplit("\n", 1)[0]
-        
-        return json.loads(content)
+        response = model.generate_content(prompt, request_options={"timeout": 45})
+        result = _parse_mindmap_json(response.text)
+        if not isinstance(result, dict):
+            raise ValueError("マインドマップのルートがJSONオブジェクトではありません。")
+        return result
     except Exception as e:
-        print(f"Error generating mindmap: {e}")
-        return {
-            "kind": "root",
-            "title": "生成エラー",
-            "body": f"生成失敗: {e}",
-            "children": []
-        }
+        raise RuntimeError(f"マインドマップ生成を完了できませんでした: {e}") from e
 
 
 def expand_node(
@@ -430,10 +436,7 @@ def expand_node(
     Expand a node by generating related children.
     mode: 'related_ideas' | 'related_tasks' | 'detail_steps'
     """
-    config = load_config()
-    genai.configure(api_key=config.llm_api_key)
-    generation_config = genai.GenerationConfig(max_output_tokens=config.max_tokens)
-    model = genai.GenerativeModel(config.llm_model, generation_config=generation_config)
+    model = _mindmap_model()
 
     prompt_mode = ""
     if mode == "related_ideas":
@@ -448,26 +451,24 @@ def expand_node(
     prompt = f"""
     以下のノード情報を元に、子ノードを生成してください。
     
-    プロジェクト概要: {context_summary}
-    親ノードタイトル: {node_title}
-    親ノード説明: {node_body}
+    プロジェクト概要: {context_summary[:4000]}
+    親ノードタイトル: {node_title[:200]}
+    親ノード説明: {node_body[:4000]}
     
     指示: {prompt_mode}
     
     出力は以下のJSONフォーマット（リスト形式）のみでお願いします。
     [
-      {{ "kind": "idea/task/detail", "title": "タイトル", "body": "説明" }},
-      ...
+      {{ "kind": "idea/task/detail", "title": "タイトル", "body": "説明" }}
     ]
     ※ kind は、related_ideasなら'idea'、related_tasksなら'task'、detail_stepsなら'detail'としてください。
     """
 
     try:
-        response = model.generate_content(prompt)
-        content = response.text
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        return json.loads(content)
+        response = model.generate_content(prompt, request_options={"timeout": 45})
+        result = _parse_mindmap_json(response.text)
+        if not isinstance(result, list) or not result:
+            raise ValueError("AIから追加できるノードが返されませんでした。")
+        return result
     except Exception as e:
-        print(f"Error expanding node: {e}")
-        return []
+        raise RuntimeError(f"AI処理を完了できませんでした: {e}") from e

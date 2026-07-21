@@ -104,7 +104,7 @@ def task_event_payload(
     deadline_hour: int = 9,
     timezone: str = "Asia/Tokyo",
 ) -> dict[str, Any] | None:
-    """Represent a date-only deadline as a timed Calendar reminder.
+    """Represent a task deadline as a timed Calendar reminder.
 
     Calendar applies the popup reminder to this all-day event.  The event body
     deliberately contains the local task ID for safe, local-wins reconciliation.
@@ -113,20 +113,29 @@ def task_event_payload(
     if not due or task.get("status") == "done":
         return None
     try:
-        start = dt.date.fromisoformat(due)
+        due_day = dt.date.fromisoformat(due)
     except (TypeError, ValueError):
         return None
+    try:
+        due_time = dt.time.fromisoformat(task["due_time"]) if task.get("due_time") else None
+    except (TypeError, ValueError):
+        due_time = None
+    start = dt.datetime.combine(
+        due_day,
+        due_time or dt.time(hour=max(0, min(23, deadline_hour))),
+    )
+    end = start + dt.timedelta(minutes=30)
     title = (task.get("tags") or task.get("raw_text") or "SymNote task").strip()
     description = task.get("raw_text", "").strip()
     return {
         "summary": title,
         "description": description,
         "start": {
-            "dateTime": f"{start.isoformat()}T{max(0, min(23, deadline_hour)):02d}:00:00",
+            "dateTime": start.isoformat(timespec="seconds"),
             "timeZone": timezone,
         },
         "end": {
-            "dateTime": f"{start.isoformat()}T{max(0, min(23, deadline_hour)):02d}:30:00",
+            "dateTime": end.isoformat(timespec="seconds"),
             "timeZone": timezone,
         },
         "reminders": {
@@ -142,7 +151,7 @@ def _pending_rows() -> list[dict[str, Any]]:
         rows = conn.execute(
             """
             SELECT o.task_id, o.operation, s.event_id, i.id, i.raw_text, i.tags,
-                   i.due_date, i.status
+                   i.due_date, i.due_time, i.status
             FROM calendar_sync_outbox AS o
             LEFT JOIN calendar_task_sync AS s ON s.task_id = o.task_id
             LEFT JOIN items AS i ON i.id = o.task_id

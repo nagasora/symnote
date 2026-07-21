@@ -9,6 +9,7 @@ from symnote.core.db import (
     complete_task,
     create_recurring_task,
     fetch_inbox,
+    fetch_tasks,
     fetch_tasks_for_today_view,
     fetch_weekly_review_sources,
     get_connection,
@@ -90,9 +91,12 @@ def test_init_migrates_legacy_task_dates(monkeypatch, tmp_path) -> None:
     init_db()
 
     with sqlite3.connect(database) as check:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 6
-        due_date = check.execute("SELECT due_date FROM items WHERE id = 1").fetchone()[0]
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 7
+        due_date, due_time = check.execute(
+            "SELECT due_date, due_time FROM items WHERE id = 1"
+        ).fetchone()
         assert due_date == "2026-07-20"
+        assert due_time is None
         assert check.execute("SELECT operation FROM calendar_sync_outbox").fetchone()[0] == "upsert"
 
 
@@ -176,3 +180,28 @@ def test_recurring_task_creates_the_next_occurrence_on_completion(monkeypatch, t
         ).fetchone()[0]
         assert queued == 2
     assert complete_task(task_id) is None
+
+
+def test_recurring_task_keeps_time_and_stops_at_end_date(monkeypatch, tmp_path) -> None:
+    database = tmp_path / "recurrence-end.db"
+    monkeypatch.setenv("DB_PATH", str(database))
+    init_db()
+    first_id = create_recurring_task(
+        "Daily review",
+        due_date="2026-07-20",
+        due_time="18:30",
+        frequency="daily",
+        end_date="2026-07-21",
+    )
+
+    second_id = complete_task(first_id)
+    assert second_id is not None
+    assert complete_task(second_id) is None
+
+    tasks = fetch_tasks(limit=10)
+    assert {(task["due_date"], task["due_time"], task["status"]) for task in tasks} == {
+        ("2026-07-20", "18:30", "done"),
+        ("2026-07-21", "18:30", "done"),
+    }
+    with sqlite3.connect(database) as check:
+        assert check.execute("SELECT active FROM task_recurrence_rules").fetchone()[0] == 0
