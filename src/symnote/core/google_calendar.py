@@ -8,13 +8,14 @@ creation or editing.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from symnote.config import AppConfig, load_config
-from symnote.core.db import connection
+from symnote.core.db import connection, fetch_tasks_for_morning_digest
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 KEYRING_SERVICE = "symnote-google-calendar"
@@ -146,6 +147,139 @@ def task_event_payload(
     }
 
 
+def _task_title(task: dict[str, Any]) -> str:
+    """Return the concise title users see in a Calendar digest."""
+    value = (task.get("tags") or task.get("raw_text") or "").strip()
+    if value:
+        return value.splitlines()[0]
+    return f"Task #{task.get('id', '?')}"
+
+
+def morning_digest_event_payload(
+    digest_date: str,
+    tasks: list[dict[str, Any]],
+    hour: int = 8,
+    timezone: str = "Asia/Tokyo",
+) -> dict[str, Any] | None:
+    """Build one 08:00 Calendar event for due and overdue local tasks."""
+    if not tasks:
+        return None
+    try:
+        day = dt.date.fromisoformat(digest_date)
+    except (TypeError, ValueError):
+        return None
+
+    due_today = [task for task in tasks if task.get("due_date") == digest_date]
+    overdue = [task for task in tasks if task.get("due_date") < digest_date]
+    lines = ["SymNote 朝の課題通知", ""]
+    if due_today:
+        lines.append(f"今日が期限（{len(due_today)}件）")
+        lines.extend(f"- {_task_title(task)}" for task in due_today)
+    if overdue:
+        if due_today:
+            lines.append("")
+        lines.append(f"やり残し（{len(overdue)}件）")
+        lines.extend(f"- {_task_title(task)}" for task in overdue)
+
+    start = dt.datetime.combine(day, dt.time(hour=max(0, min(23, hour))))
+    return {
+        "summary": f"SymNote: 今日の課題 {len(due_today)}件（やり残し {len(overdue)}件）",
+        "description": "\n".join(lines),
+        "start": {"dateTime": start.isoformat(timespec="seconds"), "timeZone": timezone},
+        "end": {
+            "dateTime": (start + dt.timedelta(minutes=15)).isoformat(timespec="seconds"),
+            "timeZone": timezone,
+        },
+        "reminders": {"useDefault": False, "overrides": [{"method": "popup", "minutes": 0}]},
+        "extendedProperties": {"private": {"symnote_morning_digest_date": digest_date}},
+    }
+
+
+def _payload_hash(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _morning_digest_mappings(today: dt.date) -> dict[str, dict[str, str]]:
+    """Remove expired local delivery state and return active event mappings."""
+    with connection() as conn, conn:
+        conn.execute(
+            "DELETE FROM calendar_morning_digest_sync WHERE digest_date < ?", (today.isoformat(),)
+        )
+        rows = conn.execute(
+            "SELECT digest_date, event_id, content_hash FROM calendar_morning_digest_sync"
+        ).fetchall()
+        return {row["digest_date"]: dict(row) for row in rows}
+
+
+def _morning_digest_operations(config: AppConfig, today: dt.date) -> list[dict[str, Any]]:
+    mappings = _morning_digest_mappings(today)
+    operations: list[dict[str, Any]] = []
+    for offset in range(config.google_calendar_morning_digest_lookahead_days):
+        digest_date = (today + dt.timedelta(days=offset)).isoformat()
+        payload = morning_digest_event_payload(
+            digest_date,
+            fetch_tasks_for_morning_digest(digest_date),
+            config.google_calendar_morning_digest_hour,
+            config.google_calendar_timezone,
+        )
+        existing = mappings.get(digest_date)
+        if payload is None:
+            if existing:
+                operations.append(
+                    {
+                        "operation": "delete",
+                        "digest_date": digest_date,
+                        "event_id": existing["event_id"],
+                    }
+                )
+            continue
+        content_hash = _payload_hash(payload)
+        if existing is None:
+            operations.append(
+                {
+                    "operation": "insert",
+                    "digest_date": digest_date,
+                    "payload": payload,
+                    "content_hash": content_hash,
+                }
+            )
+        elif existing["content_hash"] != content_hash:
+            operations.append(
+                {
+                    "operation": "update",
+                    "digest_date": digest_date,
+                    "event_id": existing["event_id"],
+                    "payload": payload,
+                    "content_hash": content_hash,
+                }
+            )
+    return operations
+
+
+def _save_morning_digest_mapping(digest_date: str, event_id: str, content_hash: str) -> None:
+    with connection() as conn, conn:
+        conn.execute(
+            """
+            INSERT INTO calendar_morning_digest_sync (
+              digest_date, event_id, content_hash, last_synced_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(digest_date) DO UPDATE SET
+              event_id = excluded.event_id,
+              content_hash = excluded.content_hash,
+              last_synced_at = excluded.last_synced_at
+            """,
+            (digest_date, event_id, content_hash, dt.datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+def _delete_morning_digest_mapping(digest_date: str) -> None:
+    with connection() as conn, conn:
+        conn.execute(
+            "DELETE FROM calendar_morning_digest_sync WHERE digest_date = ?", (digest_date,)
+        )
+
+
 def _pending_rows() -> list[dict[str, Any]]:
     with connection() as conn:
         rows = conn.execute(
@@ -186,16 +320,20 @@ def _is_not_found(error: Exception) -> bool:
 def sync_pending_tasks(
     config: AppConfig | None = None,
     service_factory: Callable[[], Any] | None = None,
+    *,
+    today: dt.date | None = None,
 ) -> SyncResult:
-    """Deliver all queued changes. Failures stay queued and are retried later."""
+    """Deliver queued task changes and rolling morning digest snapshots."""
     config = config or load_config()
     rows = _pending_rows()
-    if not rows:
+    digest_operations = _morning_digest_operations(config, today or dt.date.today())
+    if not rows and not digest_operations:
         return SyncResult(message="同期する変更はありません。")
     try:
         service = (service_factory or _calendar_service)()
     except Exception as exc:
-        return SyncResult(failed=len(rows), pending=len(rows), message=str(exc))
+        pending = len(rows) + len(digest_operations)
+        return SyncResult(failed=pending, pending=pending, message=str(exc))
 
     synced = failed = 0
     for row in rows:
@@ -236,6 +374,40 @@ def sync_pending_tasks(
             else:
                 event = service.events().insert(calendarId=config.google_calendar_id, body=payload).execute()
                 _mark_complete(task_id, event["id"], "upsert")
+            synced += 1
+        except Exception:
+            failed += 1
+    for operation in digest_operations:
+        digest_date = operation["digest_date"]
+        try:
+            if operation["operation"] == "delete":
+                try:
+                    service.events().delete(
+                        calendarId=config.google_calendar_id, eventId=operation["event_id"]
+                    ).execute()
+                except Exception as exc:
+                    if not _is_not_found(exc):
+                        raise
+                _delete_morning_digest_mapping(digest_date)
+            else:
+                payload = operation["payload"]
+                event_id = operation.get("event_id")
+                if event_id:
+                    try:
+                        service.events().update(
+                            calendarId=config.google_calendar_id, eventId=event_id, body=payload
+                        ).execute()
+                    except Exception as exc:
+                        if not _is_not_found(exc):
+                            raise
+                        event_id = service.events().insert(
+                            calendarId=config.google_calendar_id, body=payload
+                        ).execute()["id"]
+                else:
+                    event_id = service.events().insert(
+                        calendarId=config.google_calendar_id, body=payload
+                    ).execute()["id"]
+                _save_morning_digest_mapping(digest_date, event_id, operation["content_hash"])
             synced += 1
         except Exception:
             failed += 1

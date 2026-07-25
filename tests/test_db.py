@@ -10,6 +10,7 @@ from symnote.core.db import (
     create_recurring_task,
     fetch_inbox,
     fetch_tasks,
+    fetch_tasks_for_morning_digest,
     fetch_tasks_for_today_view,
     fetch_weekly_review_sources,
     get_connection,
@@ -91,13 +92,17 @@ def test_init_migrates_legacy_task_dates(monkeypatch, tmp_path) -> None:
     init_db()
 
     with sqlite3.connect(database) as check:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 8
         due_date, due_time = check.execute(
             "SELECT due_date, due_time FROM items WHERE id = 1"
         ).fetchone()
         assert due_date == "2026-07-20"
         assert due_time is None
         assert check.execute("SELECT operation FROM calendar_sync_outbox").fetchone()[0] == "upsert"
+        assert check.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'calendar_morning_digest_sync'"
+        ).fetchone()[0] == "calendar_morning_digest_sync"
 
 
 def test_connection_configuration_and_backup(monkeypatch, tmp_path) -> None:
@@ -129,6 +134,26 @@ def test_tasks_without_deadline_are_not_treated_as_due(monkeypatch, tmp_path) ->
     init_db()
     insert_task("No deadline", date_str="2026-07-01")
     assert fetch_tasks_for_today_view("2026-07-20") == []
+
+
+def test_morning_digest_includes_only_unfinished_dated_tasks_due_by_target(
+    monkeypatch, tmp_path
+) -> None:
+    database = tmp_path / "morning-digest.db"
+    monkeypatch.setenv("DB_PATH", str(database))
+    init_db()
+    overdue = insert_task("Overdue", due_date="2026-07-19")
+    due_today = insert_task("Due today", due_date="2026-07-20")
+    completed = insert_task("Completed", due_date="2026-07-18")
+    insert_task("Future", due_date="2026-07-21")
+    insert_task("No deadline", date_str="2026-07-01")
+    complete_task(completed)
+
+    tasks = fetch_tasks_for_morning_digest("2026-07-20")
+    assert [(task["id"], task["raw_text"], task["due_date"]) for task in tasks] == [
+        (overdue, "Overdue", "2026-07-19"),
+        (due_today, "Due today", "2026-07-20"),
+    ]
 
 
 def test_weekly_sources_include_tasks_due_during_week(monkeypatch, tmp_path) -> None:

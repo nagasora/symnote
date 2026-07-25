@@ -166,10 +166,18 @@ def render_google_calendar_tab() -> None:
         f"通知: 期限日 {config.google_calendar_deadline_hour:02d}:00 の Google Calendar "
         f"ポップアップ通知（{config.google_calendar_reminder_minutes} 分前）"
     )
+    st.write(
+        f"朝の課題まとめ: 毎日 {config.google_calendar_morning_digest_hour:02d}:00 に通知 "
+        f"（今後 {config.google_calendar_morning_digest_lookahead_days} 日分を同期）"
+    )
     st.caption(
         "期限時刻を指定したタスクは、その時刻から 30 分の予定として登録されます。時刻未指定の既存タスクは、"
         f"期限日の {config.google_calendar_deadline_hour:02d}:00 から登録されます。端末で通知を受け取るには、"
         "Google Calendar アプリ／ブラウザ側で通知を許可してください。"
+    )
+    st.caption(
+        "朝の通知には、当日が期限の未完了タスクと期限切れのやり残しを含めます。"
+        "PC が停止中でも最後に成功した同期内容を Google Calendar が通知します。"
     )
 
     if not google_calendar_connected():
@@ -1013,6 +1021,11 @@ def main() -> None:
         render_idea_tab()
     else:
         render_doc_analysis_tab()
+
+    # The start-of-run sync retries offline work.  A second, best-effort pass
+    # publishes task changes made by the screen that was just rendered.
+    if google_calendar_connected():
+        sync_pending_tasks()
 
 
 if __name__ == "__main__":

@@ -56,6 +56,8 @@ docker compose up --build
 
 `GOOGLE_CALENDAR_ID` は対象カレンダー（既定: `primary`）、`GOOGLE_CALENDAR_REMINDER_MINUTES` はポップアップ通知の分数（既定: `30`）です。時刻は `GOOGLE_CALENDAR_DEADLINE_HOUR`（既定: `9`）、タイムゾーンは `GOOGLE_CALENDAR_TIMEZONE`（既定: `Asia/Tokyo`）で変更できます。通知を受け取る端末では Google Calendar アプリまたはブラウザの通知を許可してください。
 
+接続済みの Google Calendar には、毎朝 08:00（既定）に「今日が期限の未完了タスク」と「期限切れのやり残し」をまとめる予定も作成されます。`GOOGLE_CALENDAR_MORNING_DIGEST_HOUR` と `GOOGLE_CALENDAR_MORNING_DIGEST_LOOKAHEAD_DAYS`（既定: `31`）で時刻と同期対象期間を変更できます。SymNote は同期成功時点で今後の予定を更新するため、PC が停止中でもスマホの Google Calendar は最後に同期された内容を通知します。Google Calendar アプリ側の通知を許可してください。
+
 ## 繰り返しタスク
 
 タスク登録時に「なし」「毎日」「毎週」「隔週」を選べます。繰り返しタスクを完了にすると、完了履歴を残したまま次回分が自動作成されます。各回は通常のタスクとして Google Calendar に同期されるため、予定や通知の状態も混ざりません。タスク編集画面から「繰り返しを停止」を選ぶと、以降の自動作成だけを止められます。

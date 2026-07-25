@@ -22,6 +22,8 @@ class AppConfig:
     google_calendar_reminder_minutes: int
     google_calendar_timezone: str
     google_calendar_deadline_hour: int
+    google_calendar_morning_digest_hour: int
+    google_calendar_morning_digest_lookahead_days: int
 
 
 def load_config() -> AppConfig:
@@ -54,4 +56,10 @@ def load_config() -> AppConfig:
         ),
         google_calendar_timezone=os.getenv("GOOGLE_CALENDAR_TIMEZONE", "Asia/Tokyo"),
         google_calendar_deadline_hour=int(os.getenv("GOOGLE_CALENDAR_DEADLINE_HOUR", "9")),
+        google_calendar_morning_digest_hour=int(
+            os.getenv("GOOGLE_CALENDAR_MORNING_DIGEST_HOUR", "8")
+        ),
+        google_calendar_morning_digest_lookahead_days=max(
+            1, int(os.getenv("GOOGLE_CALENDAR_MORNING_DIGEST_LOOKAHEAD_DAYS", "31"))
+        ),
     )

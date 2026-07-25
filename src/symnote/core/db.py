@@ -43,7 +43,7 @@ def get_connection() -> sqlite3.Connection:
 def _migrate_db(conn: sqlite3.Connection) -> None:
     """必要なカラムが足りない場合に ALTER TABLE で追加する簡易マイグレーション。"""
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if current > 7:
+    if current > 8:
         raise RuntimeError("This database requires a newer version of SymNote.")
 
     if current < 1:
@@ -138,6 +138,22 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
         if "end_date" not in rule_columns:
             conn.execute("ALTER TABLE task_recurrence_rules ADD COLUMN end_date TEXT")
         conn.execute("PRAGMA user_version = 7")
+        current = 7
+    if current < 8:
+        # Morning digest events are derived delivery state.  Task data remains
+        # local and authoritative, while this table lets Calendar events be
+        # updated or deleted safely after an interrupted/offline sync.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS calendar_morning_digest_sync (
+              digest_date TEXT PRIMARY KEY,
+              event_id TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              last_synced_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("PRAGMA user_version = 8")
 
 
 def init_db() -> None:
@@ -170,6 +186,10 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_kind ON items(kind);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_calendar_outbox_changed ON calendar_sync_outbox(changed_at);")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_calendar_morning_digest_synced "
+            "ON calendar_morning_digest_sync(last_synced_at);"
+        )
 
         # idea_sessions table
         conn.execute(
@@ -578,6 +598,28 @@ def fetch_tasks_for_today_view(today_str: str) -> List[ItemRow]:
             importance DESC
         """,
         (today_str,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def fetch_tasks_for_morning_digest(target_date: str) -> List[ItemRow]:
+    """Return unfinished dated tasks due on or before ``target_date``.
+
+    The morning digest intentionally ignores status-only "today" tasks with
+    no deadline, so its scope is stable even when the desktop app is offline.
+    """
+    with connection() as conn:
+        cur = conn.execute(
+            """
+            SELECT id, raw_text, tags, due_date
+            FROM items
+            WHERE kind = 'task'
+              AND status != 'done'
+              AND due_date IS NOT NULL
+              AND due_date <= ?
+            ORDER BY due_date ASC, id ASC
+            """,
+            (target_date,),
         )
         return [dict(r) for r in cur.fetchall()]
 
