@@ -178,12 +178,11 @@ def morning_digest_event_payload(
     if overdue:
         if due_today:
             lines.append("")
-        lines.append(f"やり残し（{len(overdue)}件）")
+        lines.append(f"期限切れ（{len(overdue)}件）")
         lines.extend(f"- {_task_title(task)}" for task in overdue)
-
     start = dt.datetime.combine(day, dt.time(hour=max(0, min(23, hour))))
     return {
-        "summary": f"SymNote: 今日の課題 {len(due_today)}件（やり残し {len(overdue)}件）",
+        "summary": f"SymNote: 今日の課題 {len(due_today)}件（期限切れ {len(overdue)}件）",
         "description": "\n".join(lines),
         "start": {"dateTime": start.isoformat(timespec="seconds"), "timeZone": timezone},
         "end": {
@@ -215,44 +214,35 @@ def _morning_digest_mappings(today: dt.date) -> dict[str, dict[str, str]]:
 def _morning_digest_operations(config: AppConfig, today: dt.date) -> list[dict[str, Any]]:
     mappings = _morning_digest_mappings(today)
     operations: list[dict[str, Any]] = []
-    for offset in range(config.google_calendar_morning_digest_lookahead_days):
-        digest_date = (today + dt.timedelta(days=offset)).isoformat()
-        payload = morning_digest_event_payload(
-            digest_date,
-            fetch_tasks_for_morning_digest(digest_date),
-            config.google_calendar_morning_digest_hour,
-            config.google_calendar_timezone,
-        )
-        existing = mappings.get(digest_date)
-        if payload is None:
-            if existing:
-                operations.append(
-                    {
-                        "operation": "delete",
-                        "digest_date": digest_date,
-                        "event_id": existing["event_id"],
-                    }
-                )
-            continue
+    digest_date = today.isoformat()
+    payload = morning_digest_event_payload(
+        digest_date,
+        fetch_tasks_for_morning_digest(digest_date),
+        config.google_calendar_morning_digest_hour,
+        config.google_calendar_timezone,
+    )
+    existing = mappings.get(digest_date)
+    if payload is None:
+        if existing:
+            operations.append(
+                {"operation": "delete", "digest_date": digest_date, "event_id": existing["event_id"]}
+            )
+    else:
         content_hash = _payload_hash(payload)
         if existing is None:
             operations.append(
-                {
-                    "operation": "insert",
-                    "digest_date": digest_date,
-                    "payload": payload,
-                    "content_hash": content_hash,
-                }
+                {"operation": "insert", "digest_date": digest_date, "payload": payload, "content_hash": content_hash}
             )
         elif existing["content_hash"] != content_hash:
             operations.append(
-                {
-                    "operation": "update",
-                    "digest_date": digest_date,
-                    "event_id": existing["event_id"],
-                    "payload": payload,
-                    "content_hash": content_hash,
-                }
+                {"operation": "update", "digest_date": digest_date, "event_id": existing["event_id"], "payload": payload, "content_hash": content_hash}
+            )
+
+    # Clean up future events created by the former rolling-lookahead sync.
+    for mapped_date, mapping in mappings.items():
+        if mapped_date > digest_date:
+            operations.append(
+                {"operation": "delete", "digest_date": mapped_date, "event_id": mapping["event_id"]}
             )
     return operations
 
@@ -289,7 +279,14 @@ def _pending_rows() -> list[dict[str, Any]]:
             FROM calendar_sync_outbox AS o
             LEFT JOIN calendar_task_sync AS s ON s.task_id = o.task_id
             LEFT JOIN items AS i ON i.id = o.task_id
-            ORDER BY o.changed_at, o.task_id
+            UNION ALL
+            SELECT s.task_id, 'delete', s.event_id, NULL, NULL, NULL,
+                   NULL, NULL, NULL
+            FROM calendar_task_sync AS s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM calendar_sync_outbox AS o WHERE o.task_id = s.task_id
+            )
+            ORDER BY task_id
             """
         ).fetchall()
         return [dict(row) for row in rows]
@@ -323,7 +320,7 @@ def sync_pending_tasks(
     *,
     today: dt.date | None = None,
 ) -> SyncResult:
-    """Deliver queued task changes and rolling morning digest snapshots."""
+    """Deliver the same-day digest and remove legacy per-task Calendar events."""
     config = config or load_config()
     rows = _pending_rows()
     digest_operations = _morning_digest_operations(config, today or dt.date.today())
@@ -336,47 +333,22 @@ def sync_pending_tasks(
         return SyncResult(failed=pending, pending=pending, message=str(exc))
 
     synced = failed = 0
+    failure_message = ""
     for row in rows:
-        task_id, event_id, operation = row["task_id"], row["event_id"], row["operation"]
+        task_id, event_id = row["task_id"], row["event_id"]
         try:
-            payload = task_event_payload(
-                row,
-                config.google_calendar_reminder_minutes,
-                config.google_calendar_deadline_hour,
-                config.google_calendar_timezone,
-            )
-            should_delete = operation == "delete" or payload is None
-            if should_delete:
-                if event_id:
-                    try:
-                        service.events().delete(calendarId=config.google_calendar_id, eventId=event_id).execute()
-                    except Exception as exc:
-                        # Deleting an event already removed in Calendar is success.
-                        if getattr(getattr(exc, "resp", None), "status", None) != 404:
-                            raise
-                _mark_complete(task_id, None, "delete")
-            elif event_id:
+            if event_id:
                 try:
-                    service.events().update(
-                        calendarId=config.google_calendar_id, eventId=event_id, body=payload
-                    ).execute()
+                    service.events().delete(calendarId=config.google_calendar_id, eventId=event_id).execute()
                 except Exception as exc:
-                    # A Calendar event may have been removed outside SymNote.
-                    # Recreate it and replace the stale local mapping instead
-                    # of leaving this task permanently queued for retry.
                     if not _is_not_found(exc):
                         raise
-                    event = service.events().insert(
-                        calendarId=config.google_calendar_id, body=payload
-                    ).execute()
-                    event_id = event["id"]
-                _mark_complete(task_id, event_id, "upsert")
-            else:
-                event = service.events().insert(calendarId=config.google_calendar_id, body=payload).execute()
-                _mark_complete(task_id, event["id"], "upsert")
+            _mark_complete(task_id, None, "delete")
             synced += 1
-        except Exception:
+        except Exception as exc:
             failed += 1
+            if not failure_message:
+                failure_message = str(exc)
     for operation in digest_operations:
         digest_date = operation["digest_date"]
         try:
@@ -409,6 +381,13 @@ def sync_pending_tasks(
                     ).execute()["id"]
                 _save_morning_digest_mapping(digest_date, event_id, operation["content_hash"])
             synced += 1
-        except Exception:
+        except Exception as exc:
             failed += 1
-    return SyncResult(synced=synced, failed=failed, pending=failed)
+            if not failure_message:
+                failure_message = str(exc)
+    return SyncResult(
+        synced=synced,
+        failed=failed,
+        pending=failed,
+        message=failure_message,
+    )

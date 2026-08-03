@@ -81,7 +81,7 @@ def test_event_payload_uses_the_task_due_time_when_present() -> None:
     assert payload["end"]["dateTime"] == "2026-07-20T15:15:00"
 
 
-def test_morning_digest_payload_separates_due_today_and_overdue() -> None:
+def test_morning_digest_payload_includes_due_today_and_overdue() -> None:
     payload = morning_digest_event_payload(
         "2026-07-20",
         [
@@ -91,9 +91,9 @@ def test_morning_digest_payload_separates_due_today_and_overdue() -> None:
     )
 
     assert payload is not None
-    assert payload["summary"] == "SymNote: 今日の課題 1件（やり残し 1件）"
+    assert payload["summary"] == "SymNote: 今日の課題 1件（期限切れ 1件）"
     assert "今日が期限（1件）\n- Today title" in payload["description"]
-    assert "やり残し（1件）\n- Late title" in payload["description"]
+    assert "期限切れ（1件）\n- Late title" in payload["description"]
     assert payload["start"]["dateTime"] == "2026-07-20T08:00:00"
     assert payload["reminders"]["overrides"] == [{"method": "popup", "minutes": 0}]
 
@@ -110,24 +110,21 @@ def test_sync_creates_then_deletes_mapped_event(monkeypatch, tmp_path) -> None:
         load_config(), service_factory=lambda: service, today=date(2026, 7, 20)
     )
     assert result == result.__class__(synced=2, failed=0, pending=0)
-    assert service.events_api.insert_calls[0]["body"]["summary"] == "Ship release"
+    assert service.events_api.insert_calls[0]["body"]["summary"] == "SymNote: 今日の課題 1件（期限切れ 0件）"
 
     delete_item(task_id)
     result = sync_pending_tasks(
         load_config(), service_factory=lambda: service, today=date(2026, 7, 20)
     )
     assert result.synced == 2
-    assert service.events_api.delete_calls == [
-        {"calendarId": "primary", "eventId": "event-1"},
-        {"calendarId": "primary", "eventId": "event-1"},
-    ]
+    assert service.events_api.delete_calls == [{"calendarId": "primary", "eventId": "event-1"}]
     with sqlite3.connect(database) as check:
         assert check.execute("SELECT COUNT(*) FROM calendar_sync_outbox").fetchone()[0] == 0
         assert check.execute("SELECT COUNT(*) FROM calendar_task_sync").fetchone()[0] == 0
         assert check.execute("SELECT COUNT(*) FROM calendar_morning_digest_sync").fetchone()[0] == 0
 
 
-def test_sync_recreates_event_removed_from_google_calendar(monkeypatch, tmp_path) -> None:
+def test_sync_recreates_morning_digest_removed_from_google_calendar(monkeypatch, tmp_path) -> None:
     database = tmp_path / "calendar.db"
     monkeypatch.setenv("DB_PATH", str(database))
     monkeypatch.setenv("GOOGLE_CALENDAR_MORNING_DIGEST_LOOKAHEAD_DAYS", "1")
@@ -149,11 +146,11 @@ def test_sync_recreates_event_removed_from_google_calendar(monkeypatch, tmp_path
     )
 
     assert result == result.__class__(synced=2, failed=0, pending=0)
-    assert len(service.events_api.update_calls) == 2
-    assert len(service.events_api.insert_calls) == 4
+    assert len(service.events_api.update_calls) == 1
+    assert len(service.events_api.insert_calls) == 2
     with sqlite3.connect(database) as check:
         assert check.execute(
-            "SELECT event_id FROM calendar_task_sync WHERE task_id = ?", (task_id,)
+            "SELECT event_id FROM calendar_morning_digest_sync WHERE digest_date = ?", ("2026-07-20",)
         ).fetchone()[0] == "event-1"
 
 
@@ -170,6 +167,41 @@ def test_morning_digest_failure_keeps_delivery_state_unmapped(monkeypatch, tmp_p
         load_config(), service_factory=lambda: service, today=date(2026, 7, 20)
     )
 
-    assert result == result.__class__(synced=0, failed=2, pending=2)
+    assert result == result.__class__(synced=1, failed=1, pending=1, message="offline")
     with sqlite3.connect(database) as check:
         assert check.execute("SELECT COUNT(*) FROM calendar_morning_digest_sync").fetchone()[0] == 0
+
+
+def test_sync_removes_future_digest_events_from_legacy_lookahead(monkeypatch, tmp_path) -> None:
+    database = tmp_path / "calendar-legacy-future.db"
+    monkeypatch.setenv("DB_PATH", str(database))
+    init_db()
+    with sqlite3.connect(database) as check:
+        check.execute(
+            """
+            INSERT INTO calendar_morning_digest_sync
+              (digest_date, event_id, content_hash, last_synced_at)
+            VALUES ('2026-07-21', 'future-event', 'old-hash', '2026-07-20T08:00:00')
+            """
+        )
+        check.execute(
+            """
+            INSERT INTO calendar_task_sync (task_id, event_id, last_synced_at)
+            VALUES (99, 'legacy-task-event', '2026-07-20T08:00:00')
+            """
+        )
+        check.commit()
+
+    service = _Service()
+    result = sync_pending_tasks(
+        load_config(), service_factory=lambda: service, today=date(2026, 7, 20)
+    )
+
+    assert result == result.__class__(synced=2, failed=0, pending=0)
+    assert service.events_api.delete_calls == [
+        {"calendarId": "primary", "eventId": "legacy-task-event"},
+        {"calendarId": "primary", "eventId": "future-event"}
+    ]
+    with sqlite3.connect(database) as check:
+        assert check.execute("SELECT COUNT(*) FROM calendar_morning_digest_sync").fetchone()[0] == 0
+        assert check.execute("SELECT COUNT(*) FROM calendar_task_sync").fetchone()[0] == 0

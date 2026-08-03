@@ -353,21 +353,31 @@ def _mindmap_model() -> genai.GenerativeModel:
     if not config.llm_api_key:
         raise RuntimeError("LLM_API_KEYが設定されていません。設定後にもう一度お試しください。")
     genai.configure(api_key=config.llm_api_key)
-    generation_config = genai.GenerationConfig(max_output_tokens=config.max_tokens)
+    generation_config = genai.GenerationConfig(
+        max_output_tokens=config.max_tokens,
+        response_mime_type="application/json",
+    )
     return genai.GenerativeModel(config.llm_model, generation_config=generation_config)
 
 
 def _parse_mindmap_json(content: str) -> Any:
     """Parse a JSON-only model response with an optional Markdown fence."""
     if not isinstance(content, str) or not content.strip():
-        raise ValueError("AIから空の応答が返されました。")
+        raise ValueError("AIから有効なマインドマップ形式の応答を取得できませんでした。もう一度お試しください。")
     text = content.strip()
     if text.startswith("```"):
         lines = text.splitlines()
         if len(lines) < 3 or lines[-1].strip() != "```":
             raise ValueError("AI応答のJSONコードブロックが閉じられていません。")
         text = "\n".join(lines[1:-1]).strip()
-    return json.loads(text)
+    if not text:
+        raise ValueError("AIから有効なマインドマップ形式の応答を取得できませんでした。もう一度お試しください。")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "AIから有効なマインドマップ形式の応答を取得できませんでした。もう一度お試しください。"
+        ) from exc
 
 
 def generate_initial_mindmap(source_text: str) -> Dict[str, Any]:

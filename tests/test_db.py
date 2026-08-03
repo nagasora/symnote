@@ -136,7 +136,7 @@ def test_tasks_without_deadline_are_not_treated_as_due(monkeypatch, tmp_path) ->
     assert fetch_tasks_for_today_view("2026-07-20") == []
 
 
-def test_morning_digest_includes_only_unfinished_dated_tasks_due_by_target(
+def test_morning_digest_includes_unfinished_tasks_due_by_target(
     monkeypatch, tmp_path
 ) -> None:
     database = tmp_path / "morning-digest.db"

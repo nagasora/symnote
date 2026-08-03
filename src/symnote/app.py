@@ -157,27 +157,18 @@ def render_google_calendar_tab() -> None:
     """Configure the optional, local-first Google Calendar integration."""
     st.subheader("📆 Google Calendar 同期")
     st.caption(
-        "SymNote の未完了タスク（期限あり）を Google Calendar に自動同期します。"
+        "SymNote の当日が期限の未完了タスクと期限切れタスクを、朝の通知として Google Calendar に同期します。"
         "オフライン時の変更は端末内に保留され、次回に再試行されます。"
     )
     config = load_config()
     st.write(f"対象カレンダー: `{config.google_calendar_id}`")
     st.write(
-        f"通知: 期限日 {config.google_calendar_deadline_hour:02d}:00 の Google Calendar "
-        f"ポップアップ通知（{config.google_calendar_reminder_minutes} 分前）"
-    )
-    st.write(
         f"朝の課題まとめ: 毎日 {config.google_calendar_morning_digest_hour:02d}:00 に通知 "
-        f"（今後 {config.google_calendar_morning_digest_lookahead_days} 日分を同期）"
+        "（当日が期限のタスクと期限切れタスク）"
     )
     st.caption(
-        "期限時刻を指定したタスクは、その時刻から 30 分の予定として登録されます。時刻未指定の既存タスクは、"
-        f"期限日の {config.google_calendar_deadline_hour:02d}:00 から登録されます。端末で通知を受け取るには、"
-        "Google Calendar アプリ／ブラウザ側で通知を許可してください。"
-    )
-    st.caption(
-        "朝の通知には、当日が期限の未完了タスクと期限切れのやり残しを含めます。"
-        "PC が停止中でも最後に成功した同期内容を Google Calendar が通知します。"
+        "タスクごとの予定は作成せず、当日が期限の未完了タスクと期限切れタスクを毎朝1件の通知にまとめます。"
+        "端末で通知を受け取るには、Google Calendar アプリ／ブラウザ側で通知を許可してください。"
     )
 
     if not google_calendar_connected():
@@ -195,7 +186,9 @@ def render_google_calendar_tab() -> None:
             else:
                 result = sync_pending_tasks(config)
                 if result.failed:
-                    st.warning(f"{result.pending} 件を同期保留にしました。次回起動時に再試行します。")
+                    st.warning(
+                        f"{result.pending} 件を同期保留にしました。{result.message or '次回起動時に再試行します。'}"
+                    )
                 else:
                     st.success(f"接続し、{result.synced} 件を同期しました。")
         return
@@ -206,10 +199,27 @@ def render_google_calendar_tab() -> None:
         if st.button("今すぐ同期", type="primary"):
             result = sync_pending_tasks(config)
             if result.failed:
-                st.warning(f"{result.pending} 件を保留しました。ネットワークまたは認証を確認してください。")
+                st.warning(
+                    f"{result.pending} 件を保留しました。{result.message or 'ネットワークまたは認証を確認してください。'}"
+                )
+                if "認証" in result.message or "未接続" in result.message:
+                    st.info("下の「再接続」から Google Calendar を再認証してください。")
             else:
                 st.success(f"{result.synced} 件を同期しました。")
     with right:
+        if st.button("再接続"):
+            try:
+                connect_google_calendar(config)
+            except CalendarSetupError as exc:
+                st.error(str(exc))
+            except Exception:
+                st.error("再接続に失敗しました。OAuth 設定を確認して再試行してください。")
+            else:
+                result = sync_pending_tasks(config)
+                if result.failed:
+                    st.warning(f"再接続しましたが、{result.pending} 件を保留しました。{result.message}")
+                else:
+                    st.success(f"再接続し、{result.synced} 件を同期しました。")
         if st.button("接続を解除"):
             try:
                 disconnect_google_calendar()
@@ -995,7 +1005,7 @@ def main() -> None:
     _apply_app_style()
     selected = render_sidebar()
     subtitles = {
-        "Google Calendar": "期限付きタスクを同期し、Google Calendar の通知を利用します。",
+        "Google Calendar": "当日が期限のタスクと期限切れタスクを朝に通知します。",
         "今日": "いま取り組むことを、迷わず片付けるための一覧です。",
         "タスク": "期限と時刻を決めて、優先度や繰り返しを整理します。",
         "メモ": "アイデアや記録を、タスクとは分けて残します。",
