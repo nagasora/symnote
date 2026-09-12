@@ -603,10 +603,10 @@ def fetch_tasks_for_today_view(today_str: str) -> List[ItemRow]:
 
 
 def fetch_tasks_for_morning_digest(target_date: str) -> List[ItemRow]:
-    """Return unfinished dated tasks due on or before ``target_date``.
+    """Return unfinished tasks due on or before ``target_date``.
 
-    The morning digest intentionally ignores status-only "today" tasks with
-    no deadline, so its scope is stable even when the desktop app is offline.
+    The Calendar digest includes overdue tasks so they remain visible, but
+    excludes future and status-only "today" tasks.
     """
     with connection() as conn:
         cur = conn.execute(
