@@ -11,13 +11,13 @@ Claude Desktop / Claude Code などから起動され、AI が Gmail・Slack・N
 
 from __future__ import annotations
 
+import os
 import sys
-from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
-from symnote.config import load_config
+from symnote.config import is_absolute_db_path, load_config
 from symnote.core import candidates as candidate_store
 from symnote.core import db
 
@@ -74,7 +74,8 @@ def _task_title(row: Dict[str, Any]) -> str:
     title = (row.get("tags") or "").strip()
     if title:
         return title
-    return (row.get("raw_text") or "").strip().splitlines()[0] if row.get("raw_text") else ""
+    lines = (row.get("raw_text") or "").strip().splitlines()
+    return lines[0] if lines else f"（無題 #{row['id']}）"
 
 
 def _serialize_item(row: Dict[str, Any]) -> ToolResult:
@@ -177,29 +178,49 @@ def complete_task(task_id: int) -> ToolResult:
     return {"task_id": task_id, "already_done": False, "next_task_id": next_task_id}
 
 
-TOOLS = (list_tasks, search_notes, propose_tasks, list_task_candidates, add_task, complete_task)
+READ_AND_PROPOSE_TOOLS = (list_tasks, search_notes, propose_tasks, list_task_candidates)
+DIRECT_WRITE_TOOLS = (add_task, complete_task)
+DIRECT_WRITES_ENV = "SYMNOTE_MCP_DIRECT_WRITES"
+
+DIRECT_WRITES_DISABLED_NOTE = """\
+- この接続では add_task / complete_task は無効です。タスクの追加は propose_tasks で候補として
+  提案し、ユーザーに SymNote の「候補の承認」画面で承認するよう伝えてください。
+"""
 
 
-def build_server() -> Any:
-    """ツールを登録した FastMCP サーバーを生成する。"""
+def direct_writes_enabled() -> bool:
+    """環境変数で直接書き込みツール（add_task / complete_task）が許可されているかを返す。"""
+    return os.getenv(DIRECT_WRITES_ENV, "").strip().lower() in {"1", "true", "yes"}
+
+
+def tools_for(allow_direct_writes: bool) -> Tuple[Callable[..., Any], ...]:
+    """公開するツールの組を返す。既定は参照と候補提案のみ。"""
+    if allow_direct_writes:
+        return READ_AND_PROPOSE_TOOLS + DIRECT_WRITE_TOOLS
+    return READ_AND_PROPOSE_TOOLS
+
+
+def build_server(allow_direct_writes: bool = False) -> Any:
+    """ツールを登録した FastMCP サーバーを生成する。
+
+    外部情報を読む AI に直接書き込みツールを見せると、メール本文などの指示（プロンプト
+    インジェクション）で承認を迂回できてしまうため、既定では提案までに限定する。
+    """
     from mcp.server.fastmcp import FastMCP
 
-    server = FastMCP("symnote", instructions=SERVER_INSTRUCTIONS)
-    for tool in TOOLS:
+    instructions = SERVER_INSTRUCTIONS
+    if not allow_direct_writes:
+        instructions += DIRECT_WRITES_DISABLED_NOTE
+    server = FastMCP("symnote", instructions=instructions)
+    for tool in tools_for(allow_direct_writes):
         server.add_tool(tool)
     return server
 
 
 def _ensure_absolute_db_path() -> None:
-    """相対パスの DB_PATH を拒否する。
-
-    MCP クライアントは任意の作業ディレクトリでサーバーを起動するため、
-    相対パスだと空の DB を別の場所に黙って作ってしまう。
-    """
+    """作業ディレクトリに依存する DB_PATH を拒否する。"""
     db_path = load_config().db_path
-    if db_path == ":memory:" or db_path.startswith("file:"):
-        return
-    if not Path(db_path).is_absolute():
+    if not is_absolute_db_path(db_path):
         print(
             f"SymNote MCP: DB_PATH は絶対パスで指定してください（現在: {db_path!r}）。"
             " MCP クライアント設定の env で DB_PATH を渡してください。",
@@ -212,7 +233,7 @@ def main() -> None:
     """stdio トランスポートで MCP サーバーを起動する。"""
     _ensure_absolute_db_path()
     db.init_db()
-    build_server().run(transport="stdio")
+    build_server(allow_direct_writes=direct_writes_enabled()).run(transport="stdio")
 
 
 if __name__ == "__main__":

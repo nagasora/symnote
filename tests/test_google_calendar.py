@@ -207,7 +207,7 @@ def test_changing_calendar_moves_digest_to_new_calendar(monkeypatch, tmp_path) -
     _sync(service)
 
     monkeypatch.setenv("GOOGLE_CALENDAR_ID", "work@example.com")
-    assert _sync(service) == SyncResult(synced=2, failed=0, pending=0)
+    assert _sync(service) == SyncResult(synced=1, failed=0, pending=0)
 
     assert service.events_api.delete_calls == [
         {"calendarId": "primary", "eventId": "sndigest20260720"}
@@ -297,3 +297,33 @@ def test_calendar_sync_command_exit_codes(monkeypatch, tmp_path) -> None:
         command, "sync_pending_tasks", lambda config: SyncResult(failed=1, pending=1, message="x")
     )
     assert command.run() == 1
+
+
+def test_failed_old_calendar_delete_is_retried_before_moving(monkeypatch, tmp_path) -> None:
+    """旧カレンダーの削除に失敗したら新カレンダーへは作らず、次回に削除からやり直す。"""
+    database = tmp_path / "calendar-move-retry.db"
+    monkeypatch.setenv("DB_PATH", str(database))
+    init_db()
+    insert_task("Ship release", due_date="2026-07-20")
+    service = _Service()
+    _sync(service)
+    monkeypatch.setenv("GOOGLE_CALENDAR_ID", "work@example.com")
+
+    original_delete = service.events_api.delete
+
+    def failing_delete(**kwargs: object) -> _Request:
+        service.events_api.delete_calls.append(kwargs)
+        raise RuntimeError("offline")
+
+    service.events_api.delete = failing_delete
+    assert _sync(service) == SyncResult(synced=0, failed=1, pending=1, message="offline")
+    assert _mapping(database) == ("sndigest20260720", "primary")
+    assert all(call["calendarId"] == "primary" for call in service.events_api.insert_calls)
+
+    service.events_api.delete = original_delete
+    assert _sync(service) == SyncResult(synced=1, failed=0, pending=0)
+    assert [call["calendarId"] for call in service.events_api.delete_calls] == [
+        "primary",
+        "primary",
+    ]
+    assert _mapping(database) == ("sndigest20260720", "work@example.com")

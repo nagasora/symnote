@@ -216,15 +216,27 @@ def approve_candidate(
     """
     final_due_date = normalize_due_date(due_date) if due_date is not None else None
     final_due_time = normalize_due_time(due_time) if due_time is not None else None
+    decided_at = dt.datetime.now().isoformat(timespec="seconds")
     with connection() as conn, conn:
-        row = conn.execute(
-            "SELECT * FROM task_candidates WHERE id = ?", (candidate_id,)
-        ).fetchone()
-        if row is None:
-            raise LookupError(f"候補 {candidate_id} は存在しません。")
-        candidate = dict(row)
-        if candidate["status"] != "pending":
-            raise ValueError(f"候補 {candidate_id} は既に {candidate['status']} です。")
+        # 状態確認より先に条件付き UPDATE で候補を獲得する。SELECT から始めると書き込みロックが
+        # 取られず、同時承認で両方が pending を読んでタスクを二重作成してしまうため。
+        claimed = conn.execute(
+            """
+            UPDATE task_candidates SET status = 'approved', decided_at = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (decided_at, candidate_id),
+        )
+        if claimed.rowcount == 0:
+            row = conn.execute(
+                "SELECT status FROM task_candidates WHERE id = ?", (candidate_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"候補 {candidate_id} は存在しません。")
+            raise ValueError(f"候補 {candidate_id} は既に {row['status']} です。")
+        candidate = dict(
+            conn.execute("SELECT * FROM task_candidates WHERE id = ?", (candidate_id,)).fetchone()
+        )
         final_title = _normalize_whitespace(title) if title is not None else candidate["title"]
         if not final_title:
             raise ValueError("タイトルは空にできません。")
@@ -241,12 +253,7 @@ def approve_candidate(
             urgency=3,
         )
         conn.execute(
-            """
-            UPDATE task_candidates
-            SET status = 'approved', decided_at = ?, task_id = ?
-            WHERE id = ?
-            """,
-            (dt.datetime.now().isoformat(timespec="seconds"), task_id, candidate_id),
+            "UPDATE task_candidates SET task_id = ? WHERE id = ?", (task_id, candidate_id)
         )
         return task_id
 

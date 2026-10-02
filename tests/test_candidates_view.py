@@ -51,3 +51,24 @@ def test_approve_button_turns_candidate_into_task(monkeypatch, tmp_path) -> None
     assert not app.exception
     assert [task["tags"] for task in fetch_tasks()] == ["請求書を確認する"]
     assert [row["title"] for row in list_candidates("pending")] == ["![x](https://evil/p.png)"]
+
+
+def test_approved_external_text_stays_escaped_on_task_screens(monkeypatch, tmp_path) -> None:
+    """承認後の「今日」画面でも、外部由来の画像・リンク記法は Markdown として解釈されない。"""
+    from symnote.core.candidates import approve_candidate
+
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "escaped.db"))
+    init_db()
+    evil = "![x](https://evil.example/p.png)"
+    candidate_id = propose_candidates(
+        [validate_candidate(source="gmail", source_ref="m9", title=evil, details=evil)]
+    ).created_ids[0]
+    approve_candidate(candidate_id, due_date="2000-01-01")
+
+    app = AppTest.from_file("src/symnote/app.py", default_timeout=15)
+    app.run()
+
+    assert not app.exception
+    rendered = [block.value for block in app.markdown] + [e.label for e in app.expander]
+    assert any("evil" in value for value in rendered)
+    assert not any("](https://evil" in value for value in rendered)

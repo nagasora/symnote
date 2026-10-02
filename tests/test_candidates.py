@@ -157,3 +157,39 @@ def test_migration_adds_candidate_table_to_existing_database(database) -> None:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
     assert "task_candidates" in tables
     assert version == SCHEMA_VERSION
+
+
+def test_concurrent_approvals_create_exactly_one_task(database) -> None:
+    """同じ候補を同時に承認しても、タスクは 1 件だけ作られる。"""
+    import threading
+
+    candidate_id = propose_candidates([_gmail()]).created_ids[0]
+    barrier = threading.Barrier(4)
+    outcomes: list[object] = []
+
+    def approve() -> None:
+        barrier.wait()
+        try:
+            outcomes.append(approve_candidate(candidate_id))
+        except ValueError as exc:
+            outcomes.append(exc)
+
+    threads = [threading.Thread(target=approve) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sum(isinstance(outcome, int) for outcome in outcomes) == 1
+    assert len(fetch_tasks()) == 1
+
+
+def test_rejected_candidate_cannot_be_approved(database) -> None:
+    """却下済みの候補は承認できず、却下状態のまま残る。"""
+    candidate_id = propose_candidates([_gmail()]).created_ids[0]
+    reject_candidate(candidate_id)
+
+    with pytest.raises(ValueError):
+        approve_candidate(candidate_id)
+    assert [row["id"] for row in list_candidates("rejected")] == [candidate_id]
+    assert fetch_tasks() == []

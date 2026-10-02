@@ -243,16 +243,13 @@ def _morning_digest_operations(config: AppConfig, today: dt.date) -> list[dict[s
         config.google_calendar_timezone,
     )
     existing = mappings.get(digest_date)
+    previous: dict[str, str] | None = None
     if existing and (existing.get("calendar_id") or calendar_id) != calendar_id:
         # 対象カレンダーが変わった: 旧カレンダーの予定を消し、新しい側へ作り直す。
-        operations.append(
-            {
-                "operation": "delete",
-                "digest_date": digest_date,
-                "event_id": existing["event_id"],
-                "calendar_id": existing["calendar_id"],
-            }
-        )
+        # 削除と作成を 1 操作にまとめ、削除に失敗したら記録を旧カレンダーのまま残して再試行させる。
+        previous = {"calendar_id": existing["calendar_id"], "event_id": existing["event_id"]}
+        if payload is None:
+            operations.append({"operation": "delete", "digest_date": digest_date, **previous})
         existing = None
     if payload is None:
         if existing:
@@ -274,6 +271,7 @@ def _morning_digest_operations(config: AppConfig, today: dt.date) -> list[dict[s
                     "payload": payload,
                     "content_hash": content_hash,
                     "calendar_id": calendar_id,
+                    "previous": previous,
                 }
             )
         elif existing["content_hash"] != content_hash or existing.get("calendar_id") is None:
@@ -436,6 +434,9 @@ def sync_pending_tasks(
                 _delete_event(service, calendar_id, operation["event_id"])
                 _delete_morning_digest_mapping(digest_date)
             else:
+                previous = operation.get("previous")
+                if previous:
+                    _delete_event(service, previous["calendar_id"], previous["event_id"])
                 payload = operation["payload"]
                 event_id = operation.get("event_id")
                 if event_id and event_id != morning_digest_event_id(digest_date):

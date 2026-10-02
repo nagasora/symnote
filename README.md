@@ -84,9 +84,9 @@ SymNote は MCP サーバーとして、Claude Desktop / Claude Code などの A
 | --- | --- |
 | `list_tasks` / `search_notes` / `list_task_candidates` | 既存のタスク・メモ・候補の確認（重複提案の回避） |
 | `propose_tasks` | 外部の情報源から見つけた ToDo を候補として登録（同じ出典・タイトルは自動で重複排除、1 回 20 件まで） |
-| `add_task` / `complete_task` | 会話の中でユーザー本人が明示的に依頼したときの直接登録・完了 |
+| `add_task` / `complete_task` | 直接のタスク登録・完了（**既定では無効**。下記参照） |
 
-承認・削除のツールは公開していません。
+承認・削除のツールは公開していません。`add_task` / `complete_task` は、外部情報を読む AI がメール本文などの指示に従って承認を迂回できないよう、既定では公開しません。チャットから直接追加・完了したい場合は、`env` に `"SYMNOTE_MCP_DIRECT_WRITES": "1"` を加えた **別名の接続**（例: `symnote-write`）を登録し、メール等を読ませる作業ではその接続を有効にしないでください。
 
 ```bash
 uv pip install --python .venv/bin/python "mcp>=1.20,<2"

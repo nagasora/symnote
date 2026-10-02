@@ -13,6 +13,7 @@ from symnote.core.db import (
     complete_task,
     update_item_fields,
 )
+from symnote.views.text import escape_markdown
 
 
 def _get_month_range(year: int, month: int) -> tuple[date, date]:
@@ -174,8 +175,10 @@ def render_calendar_tab() -> None:
                     label = " (作成)"
 
                 display_title = t.get("tags") or t.get("raw_text", "")[:20]
-                with st.expander(f"[{t.get('status', '')}] {display_title}{label}"):
-                    st.write(t.get("raw_text", ""))
+                with st.expander(
+                    f"[{t.get('status', '')}] {escape_markdown(display_title)}{label}"
+                ):
+                    st.markdown(escape_markdown(t.get("raw_text", "")))
                     st.caption(f"優先度: {t.get('importance')} × {t.get('urgency')} / effort {t.get('effort')} / energy {t.get('energy')}")
                     if st.button("✔ 完了", key=f"done_calendar_{t['id']}"):
                         next_task_id = complete_task(t["id"])
@@ -191,8 +194,8 @@ def render_calendar_tab() -> None:
         else:
             for t in completed_tasks:
                 display_title = t.get("tags") or t.get("raw_text", "")[:20]
-                with st.expander(f"✅ {display_title}"):
-                    st.write(t.get("raw_text", ""))
+                with st.expander(f"✅ {escape_markdown(display_title)}"):
+                    st.markdown(escape_markdown(t.get("raw_text", "")))
                     st.caption(f"完了済み (ID: {t['id']})")
                     if st.button("未完了に戻す", key=f"revert_calendar_{t['id']}"):
                         update_item_fields(t["id"], status="inbox")
@@ -205,6 +208,6 @@ def render_calendar_tab() -> None:
         else:
             for m in memos:
                 display_title = m.get("tags") or m.get("raw_text", "")[:20]
-                with st.expander(f"メモ: {display_title}"):
-                    st.write(m.get("raw_text", ""))
-                    st.caption(f"タグ: {m.get('tags') or '-'}")
+                with st.expander(f"メモ: {escape_markdown(display_title)}"):
+                    st.markdown(escape_markdown(m.get("raw_text", "")))
+                    st.caption(f"タグ: {escape_markdown(m.get('tags') or '-')}")

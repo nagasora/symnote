@@ -50,6 +50,7 @@ from symnote.core.mindmap import (
 from symnote.calendar_app import render_calendar_tab
 from symnote.core.candidates import count_pending_candidates
 from symnote.views.candidates_view import render_candidates_tab
+from symnote.views.text import escape_markdown
 from symnote.config import load_config
 from symnote.core.doc_loader import extract_text_from_file
 from symnote.core.google_calendar import (
@@ -308,8 +309,8 @@ def render_memo_tab() -> None:
         st.info("まだメモはありません。上のフォームから追加してください。")
         return
     for memo in memos:
-        with st.expander(f"{memo['date']} | {memo.get('tags') or '無題'}"):
-            st.write(memo["raw_text"])
+        with st.expander(f"{memo['date']} | {escape_markdown(memo.get('tags') or '無題')}"):
+            st.markdown(escape_markdown(memo["raw_text"]))
 
 
 def render_task_editor(task: Dict) -> None:
@@ -481,7 +482,7 @@ def render_task_organizer_tab() -> None:
         sorted_tasks = sorted(date_tasks, key=_due_priority_tuple)
         for task in sorted_tasks:
             display_title = task.get("tags") or task.get("raw_text", "")[:20]
-            with st.expander(f"[{task.get('status', 'inbox')}] {display_title}"):
+            with st.expander(f"[{task.get('status', 'inbox')}] {escape_markdown(display_title)}"):
                 render_task_editor(task)
 
 
@@ -507,9 +508,9 @@ def _display_tasks(tasks: List[Dict], title: str) -> None:
         
         prefix = "🚨 " if is_overdue else ""
         display_title = task.get("tags") or task.get("raw_text", "")[:30]
-        st.markdown(f"**{idx}.** {prefix}{display_title}")
+        st.markdown(f"**{idx}.** {prefix}{escape_markdown(display_title)}")
         with st.expander("詳細"):
-            st.write(task.get("raw_text", ""))
+            st.markdown(escape_markdown(task.get("raw_text", "")))
         
         due = due_str or "-"
         meta = (
@@ -531,7 +532,9 @@ def _display_tasks(tasks: List[Dict], title: str) -> None:
                     st.success("完了に更新しました。")
                 st.rerun()  # Ensure this is called in a valid Streamlit context
         with btn_col2:
-            st.caption(f"status: {task.get('status', '')} | tags: {task.get('tags') or '-'}")
+            st.caption(
+                f"status: {task.get('status', '')} | tags: {escape_markdown(task.get('tags') or '-')}"
+            )
         st.divider()
 
 
@@ -553,7 +556,7 @@ def render_today_tab() -> None:
         task_lookup = {task["id"]: task for task in candidate_tasks}
         for idx, suggestion in enumerate(suggestions, start=1):
             with st.container(border=True):
-                st.markdown(f"**{idx}. {suggestion.raw_text}**")
+                st.markdown(f"**{idx}. {escape_markdown(suggestion.raw_text)}**")
                 status = (task_lookup.get(suggestion.task_id, {}).get("status") or "inbox").lower()
                 meta = f"理由: {suggestion.reason}"
                 if suggestion.due:

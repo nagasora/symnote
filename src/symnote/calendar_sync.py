@@ -10,9 +10,8 @@ launchd や cron から定期実行し、毎朝の通知予定を最新に保つ
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
-from symnote.config import load_config
+from symnote.config import is_absolute_db_path, load_config
 from symnote.core.db import init_db
 from symnote.core.google_calendar import is_connected, sync_pending_tasks
 
@@ -20,7 +19,7 @@ from symnote.core.google_calendar import is_connected, sync_pending_tasks
 def run() -> int:
     """同期を 1 回実行し、終了コード（成功・未接続は 0、失敗は 1、設定不備は 2）を返す。"""
     config = load_config()
-    if not Path(config.db_path).is_absolute():
+    if not is_absolute_db_path(config.db_path):
         # 定期実行は作業ディレクトリが不定なので、相対パスだと別の空 DB を作ってしまう。
         print(
             f"DB_PATH は絶対パスで指定してください（現在: {config.db_path!r}）。",

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -64,3 +65,16 @@ def load_config() -> AppConfig:
             os.getenv("GOOGLE_CALENDAR_MORNING_DIGEST_HOUR", "8")
         ),
     )
+
+
+def is_absolute_db_path(db_path: str) -> bool:
+    """DB_PATH が作業ディレクトリに依存しない場所を指すかを返す。
+
+    MCP サーバーや定期同期は任意の作業ディレクトリで起動されるため、
+    相対パス（``file:`` URI の相対パスを含む）では別の空 DB を作ってしまう。
+    """
+    if db_path == ":memory:":
+        return True
+    if db_path.startswith("file:"):
+        return Path(urlparse(db_path).path).is_absolute()
+    return Path(db_path).is_absolute()

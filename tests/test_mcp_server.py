@@ -26,25 +26,35 @@ def _proposal(**overrides) -> mcp_server.ProposedTask:
     return mcp_server.ProposedTask(**fields)
 
 
-def test_server_exposes_expected_tools_without_approval() -> None:
-    """公開ツールに承認操作は含まれない（承認は人が画面で行う）。"""
-    tools = {tool.__name__ for tool in mcp_server.TOOLS}
-    assert tools == {
+def _registered(server) -> set:
+    """FastMCP に登録されたツール名を返す。"""
+    return {tool.name for tool in server._tool_manager.list_tools()}
+
+
+def test_default_server_exposes_only_read_and_propose_tools(monkeypatch) -> None:
+    """既定では参照と候補提案だけを公開し、直接書き込み・承認・削除は公開しない。"""
+    monkeypatch.delenv(mcp_server.DIRECT_WRITES_ENV, raising=False)
+
+    server = mcp_server.build_server(allow_direct_writes=mcp_server.direct_writes_enabled())
+
+    assert _registered(server) == {
         "list_tasks",
         "search_notes",
         "propose_tasks",
         "list_task_candidates",
-        "add_task",
-        "complete_task",
     }
-    assert not any("approve" in name or "delete" in name for name in tools)
 
 
-def test_build_server_registers_all_tools() -> None:
-    """FastMCP に全ツールが登録される。"""
-    server = mcp_server.build_server()
-    registered = {tool.name for tool in server._tool_manager.list_tools()}
-    assert registered == {tool.__name__ for tool in mcp_server.TOOLS}
+def test_direct_write_tools_require_explicit_opt_in(monkeypatch) -> None:
+    """環境変数で許可したときだけ add_task / complete_task が公開される。承認は常に非公開。"""
+    monkeypatch.setenv(mcp_server.DIRECT_WRITES_ENV, "1")
+
+    registered = _registered(
+        mcp_server.build_server(allow_direct_writes=mcp_server.direct_writes_enabled())
+    )
+
+    assert {"add_task", "complete_task"} <= registered
+    assert not any("approve" in name or "delete" in name for name in registered)
 
 
 def test_propose_tasks_creates_pending_candidates_only(database) -> None:
@@ -99,15 +109,27 @@ def test_search_notes_returns_memos_and_truncates_long_text(database) -> None:
     assert len(rows[0]["details"]) <= mcp_server.MAX_TEXT_PREVIEW + 1
 
 
-def test_relative_db_path_is_refused(monkeypatch) -> None:
-    """相対パスの DB_PATH では起動せず、空の DB を作らない。"""
-    monkeypatch.setenv("DB_PATH", "./symnote.db")
+@pytest.mark.parametrize("db_path", ["./symnote.db", "symnote.db", "file:relative.db"])
+def test_relative_db_path_is_refused(monkeypatch, db_path) -> None:
+    """相対パス（file: URI を含む）の DB_PATH では起動しない。"""
+    monkeypatch.setenv("DB_PATH", db_path)
     with pytest.raises(SystemExit) as excinfo:
         mcp_server._ensure_absolute_db_path()
     assert excinfo.value.code == 2
 
 
 def test_absolute_db_path_is_accepted(monkeypatch, tmp_path) -> None:
-    """絶対パスなら起動前チェックを通過する。"""
+    """絶対パスと絶対パスの file: URI なら起動前チェックを通過する。"""
     monkeypatch.setenv("DB_PATH", str(tmp_path / "ok.db"))
     mcp_server._ensure_absolute_db_path()
+    monkeypatch.setenv("DB_PATH", f"file:{tmp_path / 'ok.db'}?mode=rw")
+    mcp_server._ensure_absolute_db_path()
+
+
+def test_blank_legacy_task_text_does_not_break_listing(database) -> None:
+    """タイトルも本文も空白だけの既存タスクがあっても一覧を返せる。"""
+    from symnote.core.db import insert_task
+
+    task_id = insert_task("   \n\t")
+
+    assert [row["title"] for row in mcp_server.list_tasks()] == [f"（無題 #{task_id}）"]
