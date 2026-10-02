@@ -48,6 +48,8 @@ from symnote.core.mindmap import (
     save_mindmap_tree,
 )
 from symnote.calendar_app import render_calendar_tab
+from symnote.core.candidates import count_pending_candidates
+from symnote.views.candidates_view import render_candidates_tab
 from symnote.config import load_config
 from symnote.core.doc_loader import extract_text_from_file
 from symnote.core.google_calendar import (
@@ -122,6 +124,7 @@ def render_sidebar() -> str:
     overview = _task_overview(all_tasks)
     pages = {
         "今日": "📌 今日",
+        "候補の承認": "📥 候補の承認",
         "タスク": "✅ タスク",
         "メモ": "📝 メモ",
         "カレンダー": "🗓️ カレンダー",
@@ -129,6 +132,9 @@ def render_sidebar() -> str:
         "ドキュメント分析": "📄 ドキュメント分析",
     }
     pages["Google Calendar"] = "📆 Google Calendar"
+    pending_candidates = count_pending_candidates()
+    if pending_candidates:
+        pages["候補の承認"] = f"📥 候補の承認（{pending_candidates}）"
     with st.sidebar:
         st.title("SymNote 🧠")
         st.caption("考えを残し、今日やることを決める。")
@@ -242,14 +248,18 @@ def render_task_tab() -> None:
             due_time = st.time_input(
                 "期限時刻", value=dt.time(hour=load_config().google_calendar_deadline_hour)
             )
-        recurrence = st.selectbox("繰り返し", ["なし", "毎日", "毎週", "隔週"])
-        end_date = None
-        if recurrence != "なし":
-            end_date = st.date_input("繰り返し終了日", value=due_date, min_value=due_date)
+        recurrence_column, end_column = st.columns(2)
+        with recurrence_column:
+            recurrence = st.selectbox("繰り返し", ["なし", "毎日", "毎週", "隔週"])
+        with end_column:
+            # フォーム内では選択に応じた再描画が起きないため、終了日は常に表示して空欄を「無期限」とする。
+            end_date = st.date_input("繰り返し終了日（空欄で無期限）", value=None)
         submitted = st.form_submit_button("タスクを保存", type="primary")
         if submitted:
             if not details.strip():
                 st.warning("タスクの詳細を入力してください。")
+            elif recurrence != "なし" and end_date is not None and end_date < due_date:
+                st.warning("繰り返し終了日は期限日以降にしてください。")
             else:
                 cadence = {"毎日": ("daily", 1), "毎週": ("weekly", 1), "隔週": ("weekly", 2)}
                 time_value = due_time.strftime("%H:%M")
@@ -1007,6 +1017,7 @@ def main() -> None:
     subtitles = {
         "Google Calendar": "当日が期限のタスクと期限切れタスクを朝に通知します。",
         "今日": "いま取り組むことを、迷わず片付けるための一覧です。",
+        "候補の承認": "AI がメールやチャットから見つけた ToDo を、確認してから登録します。",
         "タスク": "期限と時刻を決めて、優先度や繰り返しを整理します。",
         "メモ": "アイデアや記録を、タスクとは分けて残します。",
         "カレンダー": "期限と記録を、月単位で振り返ります。",
@@ -1019,6 +1030,8 @@ def main() -> None:
 
     if selected == "Google Calendar":
         render_google_calendar_tab()
+    elif selected == "候補の承認":
+        render_candidates_tab()
     elif selected == "タスク":
         render_task_tab()
     elif selected == "メモ":

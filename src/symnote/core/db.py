@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 ItemRow = Dict[str, Any]
 SQLITE_BUSY_TIMEOUT_MS = 5_000
+SCHEMA_VERSION = 9
 
 
 @contextmanager
@@ -43,7 +44,7 @@ def get_connection() -> sqlite3.Connection:
 def _migrate_db(conn: sqlite3.Connection) -> None:
     """必要なカラムが足りない場合に ALTER TABLE で追加する簡易マイグレーション。"""
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
-    if current > 8:
+    if current > SCHEMA_VERSION:
         raise RuntimeError("This database requires a newer version of SymNote.")
 
     if current < 1:
@@ -154,6 +155,37 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
             """
         )
         conn.execute("PRAGMA user_version = 8")
+        current = 8
+    if current < 9:
+        # 外部 AI が抽出した ToDo は信頼できない入力なので、items へ直接入れず
+        # 人の承認を待つ別テーブルに置く。UNIQUE で同じ出典からの再提案を弾く。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_candidates (
+              id INTEGER PRIMARY KEY,
+              created_at TEXT NOT NULL,
+              source TEXT NOT NULL,
+              source_ref TEXT NOT NULL,
+              source_url TEXT,
+              title TEXT NOT NULL,
+              details TEXT NOT NULL DEFAULT '',
+              excerpt TEXT NOT NULL DEFAULT '',
+              due_date TEXT,
+              due_time TEXT,
+              confidence REAL,
+              status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'approved', 'rejected')),
+              decided_at TEXT,
+              task_id INTEGER,
+              UNIQUE(source, source_ref, title)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_candidates_status "
+            "ON task_candidates(status, created_at)"
+        )
+        conn.execute("PRAGMA user_version = 9")
 
 
 def init_db() -> None:
@@ -242,8 +274,45 @@ def insert_item(
     urgency: Optional[int] = None,
     effort: Optional[str] = None,
     energy: Optional[str] = None,
+    recurrence_rule_id: Optional[int] = None,
 ) -> int:
     """汎用的なアイテム登録。"""
+    with connection() as conn, conn:
+        return insert_item_in_transaction(
+            conn,
+            kind=kind,
+            raw_text=raw_text,
+            date_str=date_str,
+            tags=tags,
+            due_date=due_date,
+            due_time=due_time,
+            status=status,
+            ai_category=ai_category,
+            importance=importance,
+            urgency=urgency,
+            effort=effort,
+            energy=energy,
+            recurrence_rule_id=recurrence_rule_id,
+        )
+
+
+def insert_item_in_transaction(
+    conn: sqlite3.Connection,
+    kind: str,
+    raw_text: str,
+    date_str: Optional[str] = None,
+    tags: str = "",
+    due_date: Optional[str] = None,
+    due_time: Optional[str] = None,
+    status: str = "inbox",
+    ai_category: Optional[str] = None,
+    importance: Optional[int] = None,
+    urgency: Optional[int] = None,
+    effort: Optional[str] = None,
+    energy: Optional[str] = None,
+    recurrence_rule_id: Optional[int] = None,
+) -> int:
+    """呼び出し側のトランザクション内でアイテムを登録し、その ID を返す。"""
     if not date_str:
         date_str = dt.date.today().isoformat()
     if due_time:
@@ -252,37 +321,36 @@ def insert_item(
         except ValueError as exc:
             raise ValueError("due_time must be an ISO time") from exc
     now = dt.datetime.now().isoformat(timespec="seconds")
-
-    with connection() as conn, conn:
-        cur = conn.execute(
-            """
-            INSERT INTO items (
-              created_at, date, due_date, due_time, kind, raw_text,
-              ai_category, importance, urgency, effort, energy,
-              status, tags, embedding
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
-            """,
-            (
-                now,
-                date_str,
-                due_date,
-                due_time,
-                kind,
-                raw_text,
-                ai_category,
-                importance,
-                urgency,
-                effort,
-                energy,
-                status,
-                tags,
-            ),
+    cur = conn.execute(
+        """
+        INSERT INTO items (
+          created_at, date, due_date, due_time, kind, raw_text,
+          ai_category, importance, urgency, effort, energy,
+          status, tags, embedding, recurrence_rule_id
         )
-        item_id = int(cur.lastrowid)
-        if kind == "task":
-            _queue_calendar_sync(conn, item_id, "upsert")
-        return item_id
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+        """,
+        (
+            now,
+            date_str,
+            due_date,
+            due_time,
+            kind,
+            raw_text,
+            ai_category,
+            importance,
+            urgency,
+            effort,
+            energy,
+            status,
+            tags,
+            recurrence_rule_id,
+        ),
+    )
+    item_id = int(cur.lastrowid)
+    if kind == "task":
+        _queue_calendar_sync(conn, item_id, "upsert")
+    return item_id
 
 
 def insert_memo(raw_text: str, date_str: Optional[str] = None, tags: str = "") -> int:
@@ -311,13 +379,8 @@ def insert_task(
         ai_category="task",
         importance=3,
         urgency=3,
+        recurrence_rule_id=recurrence_rule_id,
     )
-    if recurrence_rule_id is not None:
-        with connection() as conn, conn:
-            conn.execute(
-                "UPDATE items SET recurrence_rule_id = ? WHERE id = ?",
-                (recurrence_rule_id, task_id),
-            )
     return task_id
 
 
@@ -391,61 +454,66 @@ def recurrence_label(task: ItemRow) -> Optional[str]:
 def complete_task(item_id: int) -> Optional[int]:
     """Complete an occurrence and atomically create its next occurrence, if any."""
     with connection() as conn, conn:
-        task = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
-        if not task or task["kind"] != "task" or task["status"] == "done":
-            return None
-        conn.execute("UPDATE items SET status = 'done' WHERE id = ?", (item_id,))
-        _queue_calendar_sync(conn, item_id, "upsert")
-        rule_id = task["recurrence_rule_id"]
-        if rule_id is None:
-            return None
-        rule = conn.execute(
-            "SELECT interval_days, end_date FROM task_recurrence_rules WHERE id = ? AND active = 1",
-            (rule_id,),
-        ).fetchone()
-        if not rule:
-            return None
-        try:
-            base_due = dt.date.fromisoformat(task["due_date"] or dt.date.today().isoformat())
-        except ValueError:
-            base_due = dt.date.today()
-        next_due = (base_due + dt.timedelta(days=rule["interval_days"])).isoformat()
-        if rule["end_date"] and next_due > rule["end_date"]:
-            conn.execute("UPDATE task_recurrence_rules SET active = 0 WHERE id = ?", (rule_id,))
-            return None
-        existing = conn.execute(
-            "SELECT id FROM items WHERE recurrence_rule_id = ? AND due_date = ?",
-            (rule_id, next_due),
-        ).fetchone()
-        if existing:
-            return int(existing["id"])
-        now = dt.datetime.now().isoformat(timespec="seconds")
-        cur = conn.execute(
-            """
-            INSERT INTO items (
-              created_at, date, due_date, due_time, kind, raw_text, ai_category,
-              importance, urgency, effort, energy, status, tags, embedding,
-              recurrence_rule_id
-            ) VALUES (?, ?, ?, ?, 'task', ?, ?, ?, ?, ?, ?, 'inbox', ?, NULL, ?)
-            """,
-            (
-                now,
-                dt.date.today().isoformat(),
-                next_due,
-                task["due_time"],
-                task["raw_text"],
-                task["ai_category"],
-                task["importance"],
-                task["urgency"],
-                task["effort"],
-                task["energy"],
-                task["tags"],
-                rule_id,
-            ),
-        )
-        next_id = int(cur.lastrowid)
-        _queue_calendar_sync(conn, next_id, "upsert")
-        return next_id
+        return _complete_task_in_transaction(conn, item_id)
+
+
+def _complete_task_in_transaction(conn: sqlite3.Connection, item_id: int) -> Optional[int]:
+    """呼び出し側のトランザクション内でタスクを完了し、繰り返しの次回分を作成する。"""
+    task = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+    if not task or task["kind"] != "task" or task["status"] == "done":
+        return None
+    conn.execute("UPDATE items SET status = 'done' WHERE id = ?", (item_id,))
+    _queue_calendar_sync(conn, item_id, "upsert")
+    rule_id = task["recurrence_rule_id"]
+    if rule_id is None:
+        return None
+    rule = conn.execute(
+        "SELECT interval_days, end_date FROM task_recurrence_rules WHERE id = ? AND active = 1",
+        (rule_id,),
+    ).fetchone()
+    if not rule:
+        return None
+    try:
+        base_due = dt.date.fromisoformat(task["due_date"] or dt.date.today().isoformat())
+    except ValueError:
+        base_due = dt.date.today()
+    next_due = (base_due + dt.timedelta(days=rule["interval_days"])).isoformat()
+    if rule["end_date"] and next_due > rule["end_date"]:
+        conn.execute("UPDATE task_recurrence_rules SET active = 0 WHERE id = ?", (rule_id,))
+        return None
+    existing = conn.execute(
+        "SELECT id FROM items WHERE recurrence_rule_id = ? AND due_date = ?",
+        (rule_id, next_due),
+    ).fetchone()
+    if existing:
+        return int(existing["id"])
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    cur = conn.execute(
+        """
+        INSERT INTO items (
+          created_at, date, due_date, due_time, kind, raw_text, ai_category,
+          importance, urgency, effort, energy, status, tags, embedding,
+          recurrence_rule_id
+        ) VALUES (?, ?, ?, ?, 'task', ?, ?, ?, ?, ?, ?, 'inbox', ?, NULL, ?)
+        """,
+        (
+            now,
+            dt.date.today().isoformat(),
+            next_due,
+            task["due_time"],
+            task["raw_text"],
+            task["ai_category"],
+            task["importance"],
+            task["urgency"],
+            task["effort"],
+            task["energy"],
+            task["tags"],
+            rule_id,
+        ),
+    )
+    next_id = int(cur.lastrowid)
+    _queue_calendar_sync(conn, next_id, "upsert")
+    return next_id
 
 
 def stop_task_recurrence(item_id: int) -> None:
@@ -525,7 +593,8 @@ def fetch_tasks(
 ) -> List[ItemRow]:
     """タスク(kind='task')を取得。status でフィルタ可能。"""
     query = [
-        "SELECT i.id, i.created_at, i.date, i.due_date, i.due_time, i.raw_text, i.tags, i.ai_category,",
+        "SELECT i.id, i.kind, i.created_at, i.date, i.due_date, i.due_time, i.raw_text, i.tags,",
+        "i.ai_category,",
         "i.importance, i.urgency, i.effort, i.energy, i.status, i.recurrence_rule_id,",
         "r.interval_days AS recurrence_interval_days, r.end_date AS recurrence_end_date",
         "FROM items AS i LEFT JOIN task_recurrence_rules AS r ON r.id = i.recurrence_rule_id",
@@ -534,7 +603,7 @@ def fetch_tasks(
     params: List[Any] = []
     if statuses:
         placeholders = ",".join("?" for _ in statuses)
-        query.append(f"AND status IN ({placeholders})")
+        query.append(f"AND i.status IN ({placeholders})")
         params.extend(statuses)
     query.append("ORDER BY i.created_at DESC LIMIT ?")
     params.append(limit)
@@ -701,19 +770,28 @@ def update_item_fields(item_id: int, **fields: Any) -> None:
     }
     updates: List[str] = []
     params: List[Any] = []
+    completes = False
     for key, value in fields.items():
         if key not in allowed:
             continue
+        if key == "status" and value == "done":
+            # 完了は complete_task と同じ経路を通し、繰り返しの次回分を作らせる。
+            completes = True
+            continue
         updates.append(f"{key} = ?")
         params.append(value)
-    if not updates:
+    if not updates and not completes:
         return
     params.append(item_id)
     with connection() as conn, conn:
-        conn.execute(
-            f"UPDATE items SET {', '.join(updates)} WHERE id = ?", params
-        )
+        if updates:
+            conn.execute(f"UPDATE items SET {', '.join(updates)} WHERE id = ?", params)
         row = conn.execute("SELECT kind FROM items WHERE id = ?", (item_id,)).fetchone()
+        if completes:
+            if row and row["kind"] == "task":
+                _complete_task_in_transaction(conn, item_id)
+            else:
+                conn.execute("UPDATE items SET status = 'done' WHERE id = ?", (item_id,))
         if row and row["kind"] == "task":
             _queue_calendar_sync(conn, item_id, "upsert")
 
@@ -895,3 +973,38 @@ def delete_idea_session(session_id: int) -> None:
     with connection() as conn, conn:
         conn.execute("DELETE FROM mindmap_nodes WHERE project_id = ?", (session_id,))
         conn.execute("DELETE FROM idea_sessions WHERE id = ?", (session_id,))
+
+
+def search_items(
+    query: str,
+    kinds: Sequence[str] = ("task", "memo"),
+    include_done: bool = False,
+    limit: int = 20,
+) -> List[ItemRow]:
+    """本文とタイトル（tags）の部分一致でタスク・メモを検索する。"""
+    terms = [term for term in query.split() if term]
+    if not terms or not kinds:
+        return []
+    clauses: List[str] = [f"kind IN ({','.join('?' for _ in kinds)})"]
+    params: List[Any] = list(kinds)
+    if not include_done:
+        clauses.append("COALESCE(status, '') != 'done'")
+    for term in terms:
+        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        clauses.append(
+            "(raw_text LIKE ? ESCAPE '\\' OR COALESCE(tags, '') LIKE ? ESCAPE '\\')"
+        )
+        params.extend([f"%{escaped}%", f"%{escaped}%"])
+    params.append(max(1, min(int(limit), 100)))
+    with connection() as conn:
+        cur = conn.execute(
+            f"""
+            SELECT id, kind, created_at, date, due_date, due_time, raw_text, tags, status
+            FROM items
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            params,
+        )
+        return [dict(row) for row in cur.fetchall()]

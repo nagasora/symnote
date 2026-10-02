@@ -58,6 +58,41 @@ docker compose up --build
 
 接続済みの Google Calendar には、毎朝 08:00（既定）に「今日が期限の未完了タスク」と「期限切れのやり残し」をまとめる予定も作成されます。`GOOGLE_CALENDAR_MORNING_DIGEST_HOUR` と `GOOGLE_CALENDAR_MORNING_DIGEST_LOOKAHEAD_DAYS`（既定: `31`）で時刻と同期対象期間を変更できます。SymNote は同期成功時点で今後の予定を更新するため、PC が停止中でもスマホの Google Calendar は最後に同期された内容を通知します。Google Calendar アプリ側の通知を許可してください。
 
+## AI 連携（MCP サーバー）
+
+SymNote は MCP サーバーとして、Claude Desktop / Claude Code などの AI からタスク・メモを読み書きできます。AI に「Gmail と Slack から今週の ToDo を探して SymNote に提案して」と頼むと、AI は自身のコネクタで情報源を読み、`propose_tasks` で **承認待ちの候補** を登録します。候補はアプリの「📥 候補の承認」画面で確認・手直ししてから、承認したものだけがタスクになります（メール本文などに紛れた指示で勝手にタスクが作られるのを防ぐため）。
+
+| ツール | 用途 |
+| --- | --- |
+| `list_tasks` / `search_notes` / `list_task_candidates` | 既存のタスク・メモ・候補の確認（重複提案の回避） |
+| `propose_tasks` | 外部の情報源から見つけた ToDo を候補として登録（同じ出典・タイトルは自動で重複排除、1 回 20 件まで） |
+| `add_task` / `complete_task` | 会話の中でユーザー本人が明示的に依頼したときの直接登録・完了 |
+
+承認・削除のツールは公開していません。
+
+```bash
+uv pip install --python .venv/bin/python "mcp>=1.20,<2"
+```
+
+Claude Desktop の `claude_desktop_config.json`（Claude Code では `.mcp.json`）に次を追加します。`DB_PATH` は **絶対パス** で指定してください（MCP クライアントは任意の作業ディレクトリでサーバーを起動するため、相対パスだと起動を拒否します）。
+
+```json
+{
+  "mcpServers": {
+    "symnote": {
+      "command": "/absolute/path/to/symnote/.venv/bin/python",
+      "args": ["-m", "symnote.mcp_server"],
+      "env": {
+        "PYTHONPATH": "/absolute/path/to/symnote/src",
+        "DB_PATH": "/absolute/path/to/symnote.db"
+      }
+    }
+  }
+}
+```
+
+Streamlit アプリと MCP サーバーは同じ SQLite ファイルを同時に使えます（WAL モード）。
+
 ## 繰り返しタスク
 
 タスク登録時に「なし」「毎日」「毎週」「隔週」を選べます。繰り返しタスクを完了にすると、完了履歴を残したまま次回分が自動作成されます。各回は通常のタスクとして Google Calendar に同期されるため、予定や通知の状態も混ざりません。タスク編集画面から「繰り返しを停止」を選ぶと、以降の自動作成だけを止められます。
@@ -68,10 +103,13 @@ docs/                # 要件・画面仕様・データ仕様
 src/symnote/         # Streamlit UI ＋ core ロジック
   ├─ app.py          # タブ UI
   ├─ calendar_app.py # 月カレンダー
+  ├─ mcp_server.py   # MCP サーバー（AI 連携）
+  ├─ views/          # 画面単位の UI（候補の承認など）
   ├─ core/db.py      # SQLite アクセス
+  ├─ core/candidates.py # AI が提案した ToDo 候補の承認フロー
   ├─ core/nlp.py     # AI-1 & AI-2 & AI-3
   └─ core/weekly_review.py # (Deprecated)
-tests/               # これから整備
+tests/               # pytest
 docker/              # Dockerfile / entrypoint
 ```
 

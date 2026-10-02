@@ -30,7 +30,12 @@ def load_config() -> AppConfig:
     configured_db_path = os.getenv("DB_PATH")
     if configured_db_path:
         # An explicit path is user-owned configuration and must be left intact.
-        db_path = configured_db_path
+        # SQLite は "~" を展開しないため、ホーム相対の指定だけはここで解決する。
+        db_path = (
+            str(Path(configured_db_path).expanduser())
+            if configured_db_path.startswith("~")
+            else configured_db_path
+        )
     else:
         data_home = os.getenv("LOCALAPPDATA") or os.getenv("XDG_DATA_HOME")
         root = Path(data_home) if data_home else Path.home() / ".local" / "share"
