@@ -48,15 +48,33 @@ docker compose up --build
 
 ## Google Calendar 連携
 
-期限のある未完了タスクは、Google Calendar に期限日の 09:00（既定）から 30 分の予定として自動同期できます。タスクの保存・編集・完了・削除はローカル SQLite に先に記録されるため、オフライン時も失われず、次回アプリ起動時または「今すぐ同期」で再試行されます。Google の認証トークンは SQLite や `.env` には保存せず、OS の資格情報ストアに保存します。
+接続すると、Google Calendar に **毎朝 1 件の「朝のまとめ」予定**（既定 08:00、15 分、開始時にポップアップ通知）を作成します。内容は「今日が期限の未完了タスク」と「期限切れのやり残し」です。タスクごとの予定は作成しません（旧バージョンが作ったタスク別の予定は、同期時に自動で削除されます）。
+
+- タスクはローカル SQLite が正で、Calendar へは一方向に書き出すだけです。オフラインでもタスク操作は失われず、次回の同期で反映されます。
+- まとめ予定の ID は日付から決まるため、通信断の後に再試行しても予定は重複しません。
+- `GOOGLE_CALENDAR_ID` を変更すると、旧カレンダーの当日分を削除して新しいカレンダーに作り直します。
+- 「今日」は `GOOGLE_CALENDAR_TIMEZONE`（既定: `Asia/Tokyo`）の日付で判定します。
+- Google の認証トークンは SQLite や `.env` には保存せず、OS の資格情報ストアに保存します。
+
+設定手順:
 
 1. Google Cloud Console で Google Calendar API を有効にし、**Desktop app** 用 OAuth クライアントを作成する。
 2. ダウンロードしたクライアント JSON の絶対パスを `.env` の `GOOGLE_CALENDAR_CLIENT_SECRET_PATH` に設定する。
 3. アプリのサイドバーから「Google Calendar」を開き、「Google Calendar に接続」を選ぶ。
+4. 通知を受け取る端末（スマホ等）で Google Calendar アプリの通知を許可する。
 
-`GOOGLE_CALENDAR_ID` は対象カレンダー（既定: `primary`）、`GOOGLE_CALENDAR_REMINDER_MINUTES` はポップアップ通知の分数（既定: `30`）です。時刻は `GOOGLE_CALENDAR_DEADLINE_HOUR`（既定: `9`）、タイムゾーンは `GOOGLE_CALENDAR_TIMEZONE`（既定: `Asia/Tokyo`）で変更できます。通知を受け取る端末では Google Calendar アプリまたはブラウザの通知を許可してください。
+通知時刻は `GOOGLE_CALENDAR_MORNING_DIGEST_HOUR`（既定: `8`）で変更できます。タスク登録画面の期限時刻の初期値は `GOOGLE_CALENDAR_DEADLINE_HOUR`（既定: `9`）です。
 
-接続済みの Google Calendar には、毎朝 08:00（既定）に「今日が期限の未完了タスク」と「期限切れのやり残し」をまとめる予定も作成されます。`GOOGLE_CALENDAR_MORNING_DIGEST_HOUR` と `GOOGLE_CALENDAR_MORNING_DIGEST_LOOKAHEAD_DAYS`（既定: `31`）で時刻と同期対象期間を変更できます。SymNote は同期成功時点で今後の予定を更新するため、PC が停止中でもスマホの Google Calendar は最後に同期された内容を通知します。Google Calendar アプリ側の通知を許可してください。
+### アプリを開かずに毎朝同期する（macOS / launchd）
+
+まとめ予定は同期した時点の内容で作られます。アプリを開かない日も通知が届くよう、同期コマンドを定期実行してください。
+
+```bash
+DB_PATH=/absolute/path/to/symnote.db PYTHONPATH=/absolute/path/to/symnote/src \
+  /absolute/path/to/symnote/.venv/bin/python -m symnote.calendar_sync
+```
+
+`docs/launchd/com.symnote.calendar-sync.plist.example` のパスを書き換えて `~/Library/LaunchAgents/com.symnote.calendar-sync.plist` に置き、`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.symnote.calendar-sync.plist` で登録します。30 分ごとに実行され、内容が変わらなければ Google には接続しません。スリープ中に過ぎた実行は復帰時に行われます（Mac が終日停止している日は通知されません）。
 
 ## AI 連携（MCP サーバー）
 
@@ -95,7 +113,7 @@ Streamlit アプリと MCP サーバーは同じ SQLite ファイルを同時に
 
 ## 繰り返しタスク
 
-タスク登録時に「なし」「毎日」「毎週」「隔週」を選べます。繰り返しタスクを完了にすると、完了履歴を残したまま次回分が自動作成されます。各回は通常のタスクとして Google Calendar に同期されるため、予定や通知の状態も混ざりません。タスク編集画面から「繰り返しを停止」を選ぶと、以降の自動作成だけを止められます。
+タスク登録時に「なし」「毎日」「毎週」「隔週」を選べます。繰り返しタスクを完了にすると（編集画面でステータスを done にした場合も含め）、完了履歴を残したまま次回分が自動作成されます。終了日を空欄にすると無期限に繰り返します。タスク編集画面から「繰り返しを停止」を選ぶと、以降の自動作成だけを止められます。
 
 ## ディレクトリ
 ```
@@ -104,6 +122,7 @@ src/symnote/         # Streamlit UI ＋ core ロジック
   ├─ app.py          # タブ UI
   ├─ calendar_app.py # 月カレンダー
   ├─ mcp_server.py   # MCP サーバー（AI 連携）
+  ├─ calendar_sync.py # Google Calendar 定期同期コマンド
   ├─ views/          # 画面単位の UI（候補の承認など）
   ├─ core/db.py      # SQLite アクセス
   ├─ core/candidates.py # AI が提案した ToDo 候補の承認フロー

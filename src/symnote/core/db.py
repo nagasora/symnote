@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 ItemRow = Dict[str, Any]
 SQLITE_BUSY_TIMEOUT_MS = 5_000
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 @contextmanager
@@ -186,6 +186,16 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
             "ON task_candidates(status, created_at)"
         )
         conn.execute("PRAGMA user_version = 9")
+        current = 9
+    if current < 10:
+        # 対象カレンダーを変えたとき、旧カレンダーの朝のまとめを消せるように記録する。
+        # 既存行は NULL のままにし、同期時に「現在の設定のカレンダー」とみなす。
+        columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(calendar_morning_digest_sync)")
+        }
+        if "calendar_id" not in columns:
+            conn.execute("ALTER TABLE calendar_morning_digest_sync ADD COLUMN calendar_id TEXT")
+        conn.execute("PRAGMA user_version = 10")
 
 
 def init_db() -> None:

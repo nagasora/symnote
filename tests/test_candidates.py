@@ -15,7 +15,7 @@ from symnote.core.candidates import (
     reject_candidate,
     validate_candidate,
 )
-from symnote.core.db import fetch_tasks, init_db
+from symnote.core.db import SCHEMA_VERSION, fetch_tasks, init_db
 
 
 @pytest.fixture()
@@ -156,4 +156,4 @@ def test_migration_adds_candidate_table_to_existing_database(database) -> None:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
         version = conn.execute("PRAGMA user_version").fetchone()[0]
     assert "task_candidates" in tables
-    assert version == 9
+    assert version == SCHEMA_VERSION

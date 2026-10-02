@@ -22,6 +22,7 @@ mcp = [
 
 [project.scripts]
 symnote-mcp = "symnote.mcp_server:main"
+symnote-calendar-sync = "symnote.calendar_sync:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
