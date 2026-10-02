@@ -133,3 +133,22 @@ def test_blank_legacy_task_text_does_not_break_listing(database) -> None:
     task_id = insert_task("   \n\t")
 
     assert [row["title"] for row in mcp_server.list_tasks()] == [f"（無題 #{task_id}）"]
+
+
+def test_mcp_server_does_not_load_gemini_sdk() -> None:
+    """MCP サーバーの読み込みで Gemini SDK を読み込まない（起動の遅延を防ぐ）。"""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    env = {**os.environ, "PYTHONPATH": src}
+    code = (
+        "import sys, symnote.mcp_server, symnote.calendar_sync;"
+        "print('google.generativeai' in sys.modules)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True, env=env
+    )
+    assert result.stdout.strip() == "False"

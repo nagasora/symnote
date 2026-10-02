@@ -8,9 +8,11 @@ import datetime as dt
 import sqlite3
 
 from symnote.config import load_config
-from symnote.core.nlp import ClassificationResult
 
 if TYPE_CHECKING:
+    # 型注釈専用。実行時に nlp を読み込むと Gemini SDK の読み込みで起動が数秒以上遅れ、
+    # AI を使わない MCP サーバーや定期同期の起動待ちがタイムアウトするため。
+    from symnote.core.nlp import ClassificationResult
     from symnote.core.weekly_review import WeeklyReviewPayload
 
 ItemRow = Dict[str, Any]
