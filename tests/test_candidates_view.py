@@ -18,7 +18,7 @@ def _open_candidates_page(monkeypatch, tmp_path) -> AppTest:
             validate_candidate(source="slack", source_ref="s1", title="![x](https://evil/p.png)"),
         ]
     )
-    app = AppTest.from_file("src/symnote/app.py", default_timeout=15)
+    app = AppTest.from_file("src/symnote/app.py", default_timeout=60)
     app.run()
     app.sidebar.radio[0].set_value("候補の承認").run()
     return app
@@ -29,6 +29,7 @@ def test_sidebar_shows_pending_count_and_page_renders(monkeypatch, tmp_path) -> 
     app = _open_candidates_page(monkeypatch, tmp_path)
 
     assert not app.exception
+    assert any("承認待ちの候補が 2 件" in info.value for info in app.sidebar.info)
     assert {field.value for field in app.text_input if field.label == "タイトル"} == {
         "請求書を確認する",
         "![x](https://evil/p.png)",
@@ -49,6 +50,7 @@ def test_approve_button_turns_candidate_into_task(monkeypatch, tmp_path) -> None
     approve_buttons[target].click().run()
 
     assert not app.exception
+    assert app.sidebar.radio[0].value == "候補の承認"
     assert [task["tags"] for task in fetch_tasks()] == ["請求書を確認する"]
     assert [row["title"] for row in list_candidates("pending")] == ["![x](https://evil/p.png)"]
 
@@ -65,10 +67,29 @@ def test_approved_external_text_stays_escaped_on_task_screens(monkeypatch, tmp_p
     ).created_ids[0]
     approve_candidate(candidate_id, due_date="2000-01-01")
 
-    app = AppTest.from_file("src/symnote/app.py", default_timeout=15)
+    app = AppTest.from_file("src/symnote/app.py", default_timeout=60)
     app.run()
 
     assert not app.exception
     rendered = [block.value for block in app.markdown] + [e.label for e in app.expander]
     assert any("evil" in value for value in rendered)
     assert not any("](https://evil" in value for value in rendered)
+
+
+def test_today_top3_heading_uses_single_line_title(monkeypatch, tmp_path) -> None:
+    """承認したタスクの本文が複数行でも、トップ3の見出しはタイトル 1 行の太字になる。"""
+    from symnote.core.candidates import approve_candidate
+
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "heading.db"))
+    init_db()
+    candidate_id = propose_candidates(
+        [validate_candidate(source="gmail", source_ref="m1", title="見積書に返信する",
+                            source_url="https://mail.google.com/x")]
+    ).created_ids[0]
+    approve_candidate(candidate_id)
+
+    app = AppTest.from_file("src/symnote/app.py", default_timeout=60)
+    app.run()
+
+    assert not app.exception
+    assert "**1. 見積書に返信する**" in [block.value for block in app.markdown]

@@ -133,9 +133,9 @@ def render_sidebar() -> str:
         "ドキュメント分析": "📄 ドキュメント分析",
     }
     pages["Google Calendar"] = "📆 Google Calendar"
+    # 件数を表示名に入れると、件数が変わるたびに Streamlit が別ウィジェットとみなして
+    # 選択中の画面が「今日」に戻ってしまうため、表示名は固定にして件数は別に出す。
     pending_candidates = count_pending_candidates()
-    if pending_candidates:
-        pages["候補の承認"] = f"📥 候補の承認（{pending_candidates}）"
     with st.sidebar:
         st.title("SymNote 🧠")
         st.caption("考えを残し、今日やることを決める。")
@@ -153,6 +153,8 @@ def render_sidebar() -> str:
         first, second = st.columns(2)
         first.metric("未完了", overview["active"])
         second.metric("完了", overview["done"])
+        if pending_candidates:
+            st.info(f"📥 承認待ちの候補が {pending_candidates} 件あります。")
         st.divider()
         st.caption("データはこの端末の SQLite に保存されています。")
         if not load_config().llm_api_key:
@@ -556,8 +558,13 @@ def render_today_tab() -> None:
         task_lookup = {task["id"]: task for task in candidate_tasks}
         for idx, suggestion in enumerate(suggestions, start=1):
             with st.container(border=True):
-                st.markdown(f"**{idx}. {escape_markdown(suggestion.raw_text)}**")
-                status = (task_lookup.get(suggestion.task_id, {}).get("status") or "inbox").lower()
+                task = task_lookup.get(suggestion.task_id, {})
+                # 本文は複数行になりうるため、太字の見出しにはタイトル 1 行だけを使う。
+                heading = (task.get("tags") or "").strip() or next(
+                    iter(suggestion.raw_text.strip().splitlines()), f"Task #{suggestion.task_id}"
+                )
+                st.markdown(f"**{idx}. {escape_markdown(heading)}**")
+                status = (task.get("status") or "inbox").lower()
                 meta = f"理由: {suggestion.reason}"
                 if suggestion.due:
                     meta += f" / 期限: {suggestion.due}"

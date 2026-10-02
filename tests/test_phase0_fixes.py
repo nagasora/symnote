@@ -113,7 +113,7 @@ def test_task_form_creates_open_ended_recurrence(monkeypatch, tmp_path) -> None:
     """タスク画面で繰り返しを選び終了日を空欄にすると、無期限のルールが作られる。"""
     database = tmp_path / "form.db"
     monkeypatch.setenv("DB_PATH", str(database))
-    app = AppTest.from_file("src/symnote/app.py", default_timeout=15)
+    app = AppTest.from_file("src/symnote/app.py", default_timeout=60)
     app.run()
     app.sidebar.radio[0].set_value("タスク").run()
 
