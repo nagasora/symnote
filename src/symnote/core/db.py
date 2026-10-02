@@ -8,6 +8,7 @@ import datetime as dt
 import sqlite3
 
 from symnote.config import load_config
+from symnote.core.backup import create_backup
 
 if TYPE_CHECKING:
     # 型注釈専用。実行時に nlp を読み込むと Gemini SDK の読み込みで起動が数秒以上遅れ、
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 
 ItemRow = Dict[str, Any]
 SQLITE_BUSY_TIMEOUT_MS = 5_000
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 @contextmanager
@@ -41,6 +42,26 @@ def get_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     return conn
+
+
+def _backup_before_migration() -> Optional[Path]:
+    """既存 DB を更新する前に SQLite Backup API で復旧用コピーを作る。"""
+    db_path = load_config().db_path
+    if db_path == ":memory:" or db_path.startswith("file:"):
+        return None
+    source = Path(db_path).expanduser()
+    if not source.is_file() or source.stat().st_size == 0:
+        return None
+    try:
+        with sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True) as reader:
+            current = int(reader.execute("PRAGMA user_version").fetchone()[0])
+    except sqlite3.Error as exc:
+        raise RuntimeError("既存の SymNote DB を確認できないため、移行を中止しました。") from exc
+    if current >= SCHEMA_VERSION:
+        return None
+    # Why not continue after a failed backup: schema changes must remain reversible
+    # before any existing user-owned SQLite data is touched.
+    return create_backup(source, source.parent / "backups")
 
 
 def _migrate_db(conn: sqlite3.Connection) -> None:
@@ -198,11 +219,159 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
         if "calendar_id" not in columns:
             conn.execute("ALTER TABLE calendar_morning_digest_sync ADD COLUMN calendar_id TEXT")
         conn.execute("PRAGMA user_version = 10")
+        current = 10
+    if current < 11:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS progress_projects (
+              id INTEGER PRIMARY KEY,
+              project_key TEXT NOT NULL UNIQUE,
+              name TEXT NOT NULL,
+              scope TEXT NOT NULL DEFAULT 'personal'
+                CHECK(scope IN ('personal', 'workspace')),
+              workspace_name TEXT NOT NULL DEFAULT '',
+              description TEXT NOT NULL DEFAULT '',
+              owner TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS progress_goals (
+              id INTEGER PRIMARY KEY,
+              project_id INTEGER NOT NULL REFERENCES progress_projects(id) ON DELETE RESTRICT,
+              title TEXT NOT NULL,
+              description TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'planned'
+                CHECK(status IN ('planned', 'active', 'blocked', 'done')),
+              current_work TEXT NOT NULL DEFAULT '',
+              next_action TEXT NOT NULL DEFAULT '',
+              owner TEXT NOT NULL DEFAULT '',
+              blocked_reason TEXT NOT NULL DEFAULT '',
+              approval_required INTEGER NOT NULL DEFAULT 0
+                CHECK(approval_required IN (0, 1)),
+              approval_state TEXT NOT NULL DEFAULT 'not_required'
+                CHECK(approval_state IN ('not_required', 'pending', 'approved', 'rejected')),
+              revision INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """
+        )
+        item_columns = {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
+        if "progress_project_id" not in item_columns:
+            conn.execute(
+                "ALTER TABLE items ADD COLUMN progress_project_id INTEGER "
+                "REFERENCES progress_projects(id) ON DELETE RESTRICT"
+            )
+        if "progress_goal_id" not in item_columns:
+            conn.execute(
+                "ALTER TABLE items ADD COLUMN progress_goal_id INTEGER "
+                "REFERENCES progress_goals(id) ON DELETE RESTRICT"
+            )
+        if "owner" not in item_columns:
+            conn.execute("ALTER TABLE items ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
+        if "progress_revision" not in item_columns:
+            conn.execute(
+                "ALTER TABLE items ADD COLUMN progress_revision INTEGER NOT NULL DEFAULT 0"
+            )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_progress_goals_project "
+            "ON progress_goals(project_id, status, id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_items_progress_project "
+            "ON items(progress_project_id, progress_goal_id, status)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS progress_events (
+              id INTEGER PRIMARY KEY,
+              event_id TEXT NOT NULL UNIQUE,
+              payload_hash TEXT NOT NULL,
+              event_type TEXT NOT NULL CHECK(event_type IN ('report', 'review', 'manual')),
+              project_id INTEGER NOT NULL REFERENCES progress_projects(id) ON DELETE RESTRICT,
+              target_kind TEXT NOT NULL CHECK(target_kind IN ('project', 'goal', 'task')),
+              goal_id INTEGER,
+              task_id INTEGER,
+              expected_revision INTEGER,
+              observed_revision INTEGER,
+              revision_after INTEGER,
+              outcome TEXT NOT NULL
+                CHECK(outcome IN ('applied', 'pending_review', 'conflict', 'verified', 'needs_changes')),
+              claimed_status TEXT NOT NULL DEFAULT '',
+              current_work TEXT NOT NULL DEFAULT '',
+              next_action TEXT NOT NULL DEFAULT '',
+              owner TEXT NOT NULL DEFAULT '',
+              blocked_reason TEXT NOT NULL DEFAULT '',
+              approval_required INTEGER NOT NULL DEFAULT 0
+                CHECK(approval_required IN (0, 1)),
+              approval_state TEXT NOT NULL DEFAULT 'not_required'
+                CHECK(approval_state IN ('not_required', 'pending', 'approved', 'rejected')),
+              source_repo TEXT NOT NULL DEFAULT '',
+              source_branch TEXT NOT NULL DEFAULT '',
+              source_commit TEXT NOT NULL DEFAULT '',
+              source_worktree TEXT NOT NULL DEFAULT '',
+              artifact_ref TEXT NOT NULL DEFAULT '',
+              test_ref TEXT NOT NULL DEFAULT '',
+              claimed_test_result TEXT NOT NULL DEFAULT 'unknown'
+                CHECK(claimed_test_result IN ('passed', 'failed', 'not_run', 'unknown')),
+              target_event_id TEXT NOT NULL DEFAULT '',
+              reviewer TEXT NOT NULL DEFAULT '',
+              review_note TEXT NOT NULL DEFAULT '',
+              conflict_reason TEXT NOT NULL DEFAULT '',
+              reported_at TEXT NOT NULL,
+              received_at TEXT NOT NULL,
+              CHECK(
+                (target_kind = 'project' AND goal_id IS NULL AND task_id IS NULL) OR
+                (target_kind = 'goal' AND goal_id IS NOT NULL AND task_id IS NULL) OR
+                (target_kind = 'task' AND task_id IS NOT NULL AND goal_id IS NULL)
+              )
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_progress_events_project_received "
+            "ON progress_events(project_id, received_at DESC, id DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_progress_events_target "
+            "ON progress_events(target_kind, goal_id, task_id, received_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_progress_events_review "
+            "ON progress_events(target_event_id, event_type, outcome)"
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS progress_events_no_update
+            BEFORE UPDATE ON progress_events
+            BEGIN
+              SELECT RAISE(ABORT, 'progress_events is append-only');
+            END
+            """
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS progress_events_no_delete
+            BEFORE DELETE ON progress_events
+            BEGIN
+              SELECT RAISE(ABORT, 'progress_events is append-only');
+            END
+            """
+        )
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
 
 def init_db() -> None:
     """items テーブルを用意する（存在しなければ作成）。"""
+    _backup_before_migration()
     with connection() as conn, conn:
+        # Python's sqlite connection context does not make DDL transactional by
+        # itself; an explicit write transaction lets a failed migration roll back.
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS items (
@@ -474,7 +643,10 @@ def _complete_task_in_transaction(conn: sqlite3.Connection, item_id: int) -> Opt
     task = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
     if not task or task["kind"] != "task" or task["status"] == "done":
         return None
-    conn.execute("UPDATE items SET status = 'done' WHERE id = ?", (item_id,))
+    conn.execute(
+        "UPDATE items SET status = 'done', progress_revision = progress_revision + 1 WHERE id = ?",
+        (item_id,),
+    )
     _queue_calendar_sync(conn, item_id, "upsert")
     rule_id = task["recurrence_rule_id"]
     if rule_id is None:
@@ -608,6 +780,7 @@ def fetch_tasks(
         "SELECT i.id, i.kind, i.created_at, i.date, i.due_date, i.due_time, i.raw_text, i.tags,",
         "i.ai_category,",
         "i.importance, i.urgency, i.effort, i.energy, i.status, i.recurrence_rule_id,",
+        "i.progress_project_id, i.progress_goal_id, i.owner, i.progress_revision,",
         "r.interval_days AS recurrence_interval_days, r.end_date AS recurrence_end_date",
         "FROM items AS i LEFT JOIN task_recurrence_rules AS r ON r.id = i.recurrence_rule_id",
         "WHERE i.kind = 'task'",
@@ -797,6 +970,7 @@ def update_item_fields(item_id: int, **fields: Any) -> None:
     params.append(item_id)
     with connection() as conn, conn:
         if updates:
+            updates.append("progress_revision = progress_revision + 1")
             conn.execute(f"UPDATE items SET {', '.join(updates)} WHERE id = ?", params)
         row = conn.execute("SELECT kind FROM items WHERE id = ?", (item_id,)).fetchone()
         if completes:

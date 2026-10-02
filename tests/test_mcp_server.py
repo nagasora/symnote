@@ -31,8 +31,8 @@ def _registered(server) -> set:
     return {tool.name for tool in server._tool_manager.list_tools()}
 
 
-def test_default_server_exposes_only_read_and_propose_tools(monkeypatch) -> None:
-    """既定では参照と候補提案だけを公開し、直接書き込み・承認・削除は公開しない。"""
+def test_default_server_exposes_read_report_and_propose_tools(monkeypatch) -> None:
+    """既定では参照・claim 報告・候補提案のみを公開し、承認・削除は公開しない。"""
     monkeypatch.delenv(mcp_server.DIRECT_WRITES_ENV, raising=False)
 
     server = mcp_server.build_server(allow_direct_writes=mcp_server.direct_writes_enabled())
@@ -42,6 +42,9 @@ def test_default_server_exposes_only_read_and_propose_tools(monkeypatch) -> None
         "search_notes",
         "propose_tasks",
         "list_task_candidates",
+        "list_projects",
+        "list_project_progress",
+        "report_progress",
     }
 
 
@@ -73,6 +76,54 @@ def test_propose_tasks_rejects_whole_batch_on_invalid_item(database) -> None:
     with pytest.raises(ValueError):
         mcp_server.propose_tasks([_proposal(), _proposal(source_ref="x", due_date="明日")])
     assert mcp_server.list_task_candidates() == []
+
+
+def test_mcp_progress_report_is_a_claim_and_deduplicates(database) -> None:
+    """MCP は claim を追記するだけで、ToDo 完了・承認にはしない。"""
+    from symnote.core import progress
+
+    project = progress.create_project("MCP Demo")
+    goal_id = progress.create_goal(project["id"], "Finish the local review", status="active")
+    task_id = progress.create_project_task(project["id"], goal_id, "Check the import")
+    event = {
+        "schema": progress.EVENT_SCHEMA,
+        "event_id": "mcp-report-1",
+        "reported_at": "2026-10-02T12:00:00Z",
+        "project_key": project["project_key"],
+        "target": {"kind": "task", "id": task_id},
+        "expected_revision": 0,
+        "claimed_status": "completed",
+        "current_work": "The code path is implemented",
+        "next_action": "Have a person inspect the evidence",
+        "owner": "Codex",
+        "blocked_reason": "",
+        "approval_required": False,
+        "approval_state": "not_required",
+        "source": {
+            "repo": "example/symnote",
+            "branch": "feature/progress",
+            "commit": "a" * 40,
+            "worktree": "/tmp/symnote-demo",
+        },
+        "artifact_ref": "artifacts/report.txt",
+        "test_ref": "artifacts/pytest.log",
+        "claimed_test_result": "passed",
+    }
+
+    result = mcp_server.report_progress(event)
+    repeated = mcp_server.report_progress(event)
+    task = next(row for row in mcp_server.list_tasks() if row["id"] == task_id)
+    project_status = mcp_server.list_project_progress(project["project_key"])
+
+    assert result["imported_event_ids"] == [event["event_id"]]
+    assert repeated["duplicates_skipped"] == 1
+    assert task["status"] == "inbox"
+    assert task["progress_revision"] == 1
+    report = next(
+        row for row in project_status["activity"] if row["event_id"] == event["event_id"]
+    )
+    assert report["outcome"] == "pending_review"
+    assert report["review_outcome"] is None
 
 
 def test_add_list_and_complete_task(database) -> None:

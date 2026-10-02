@@ -5,6 +5,7 @@ import sqlite3
 from symnote.config import load_config
 from symnote.core.backup import create_backup
 from symnote.core.db import (
+    SCHEMA_VERSION,
     delete_item,
     complete_task,
     create_recurring_task,
@@ -92,7 +93,7 @@ def test_init_migrates_legacy_task_dates(monkeypatch, tmp_path) -> None:
     init_db()
 
     with sqlite3.connect(database) as check:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         due_date, due_time = check.execute(
             "SELECT due_date, due_time FROM items WHERE id = 1"
         ).fetchone()

@@ -50,6 +50,7 @@ from symnote.core.mindmap import (
 from symnote.calendar_app import render_calendar_tab
 from symnote.core.candidates import count_pending_candidates
 from symnote.views.candidates_view import render_candidates_tab
+from symnote.views.progress_view import render_projects_page, render_review_page, render_today_focus
 from symnote.views.text import escape_markdown
 from symnote.config import load_config
 from symnote.core.doc_loader import extract_text_from_file
@@ -113,6 +114,26 @@ def _apply_app_style() -> None:
           [data-testid="stMetric"] { padding: .55rem .15rem; }
           .symnote-kicker { color: #6b7280; font-size: .9rem; margin-bottom: .25rem; }
           .symnote-page-title { margin: 0 0 .25rem; font-size: 1.7rem; }
+          @media (max-width: 720px) {
+            .block-container { padding: 1rem .85rem 2rem; }
+            .symnote-page-title { font-size: 1.45rem; line-height: 1.2; }
+            [data-testid="stHorizontalBlock"] { flex-wrap: wrap; gap: .55rem; }
+            [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+              flex: 1 1 100% !important; width: 100% !important; min-width: 0 !important;
+            }
+            [data-testid="stMetric"] { padding: .35rem 0; }
+            .stButton > button, .stFormSubmitButton > button, [data-testid="stDownloadButton"] button {
+              width: 100%; min-height: 2.75rem; white-space: normal;
+            }
+            [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea,
+            [data-testid="stSelectbox"] [role="combobox"] { min-height: 2.75rem; }
+            [data-testid="stFileUploader"] { width: 100%; }
+            [data-testid="stText"] > div {
+              white-space: pre-wrap !important;
+              overflow-wrap: anywhere !important;
+              word-break: break-word !important;
+            }
+          }
         </style>
         """,
         unsafe_allow_html=True,
@@ -125,6 +146,8 @@ def render_sidebar() -> str:
     overview = _task_overview(all_tasks)
     pages = {
         "今日": "📌 今日",
+        "プロジェクト": "🗂️ プロジェクト",
+        "進捗レビュー": "🧾 進捗レビュー",
         "候補の承認": "📥 候補の承認",
         "タスク": "✅ タスク",
         "メモ": "📝 メモ",
@@ -541,6 +564,7 @@ def _display_tasks(tasks: List[Dict], title: str) -> None:
 
 
 def render_today_tab() -> None:
+    render_today_focus()
     today_str = dt.date.today().isoformat()
     candidate_tasks = fetch_tasks(statuses=["today", "week", "inbox"], limit=300)
     overview = _task_overview(fetch_tasks(limit=500))
@@ -1016,7 +1040,9 @@ def render_task_hub_tab() -> None:
 
 def main() -> None:
     """Streamlit でメモ・タスク・今日・カレンダービューを提供。"""
-    st.set_page_config(page_title="SymNote", page_icon="🧠", layout="wide")
+    st.set_page_config(
+        page_title="SymNote", page_icon="🧠", layout="wide", initial_sidebar_state="auto"
+    )
     init_db()
     # Never block local work on the network: failed delivery remains queued in
     # SQLite and is retried on a later app run.
@@ -1027,6 +1053,8 @@ def main() -> None:
     subtitles = {
         "Google Calendar": "当日が期限のタスクと期限切れタスクを朝に通知します。",
         "今日": "いま取り組むことを、迷わず片付けるための一覧です。",
+        "プロジェクト": "プロジェクト、目標、ToDo と担当をひとつの流れで整理します。",
+        "進捗レビュー": "エージェントの申告、競合、証拠の確認履歴を見ます。",
         "候補の承認": "AI がメールやチャットから見つけた ToDo を、確認してから登録します。",
         "タスク": "期限と時刻を決めて、優先度や繰り返しを整理します。",
         "メモ": "アイデアや記録を、タスクとは分けて残します。",
@@ -1040,6 +1068,10 @@ def main() -> None:
 
     if selected == "Google Calendar":
         render_google_calendar_tab()
+    elif selected == "プロジェクト":
+        render_projects_page()
+    elif selected == "進捗レビュー":
+        render_review_page()
     elif selected == "候補の承認":
         render_candidates_tab()
     elif selected == "タスク":
