@@ -5,6 +5,7 @@ import sqlite3
 from symnote.config import load_config
 from symnote.core.backup import create_backup
 from symnote.core.db import (
+    SCHEMA_VERSION,
     delete_item,
     complete_task,
     create_recurring_task,
@@ -92,7 +93,7 @@ def test_init_migrates_legacy_task_dates(monkeypatch, tmp_path) -> None:
     init_db()
 
     with sqlite3.connect(database) as check:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         due_date, due_time = check.execute(
             "SELECT due_date, due_time FROM items WHERE id = 1"
         ).fetchone()
@@ -230,3 +231,50 @@ def test_recurring_task_keeps_time_and_stops_at_end_date(monkeypatch, tmp_path) 
     }
     with sqlite3.connect(database) as check:
         assert check.execute("SELECT active FROM task_recurrence_rules").fetchone()[0] == 0
+
+
+def test_v15_recurrence_migration_preserves_rules(monkeypatch, tmp_path) -> None:
+    """v15のID・間隔・終了日・停止状態を変えずにv16へ移行する。"""
+    database = tmp_path / "v15-recurrence.db"
+    monkeypatch.setenv("DB_PATH", str(database))
+    init_db()
+    first = create_recurring_task("毎日", "2026-07-20", "daily", end_date="2026-08-01")
+    second = create_recurring_task("隔週", "2026-07-20", "weekly", interval=2)
+    with sqlite3.connect(database) as legacy:
+        legacy.execute("UPDATE task_recurrence_rules SET active=0 WHERE id=2")
+        expected = legacy.execute(
+            "SELECT id, frequency, interval_days, end_date, active, created_at FROM task_recurrence_rules ORDER BY id"
+        ).fetchall()
+        legacy.execute("ALTER TABLE task_recurrence_rules RENAME TO extended_rules")
+        legacy.execute(
+            "CREATE TABLE task_recurrence_rules ("
+            "id INTEGER PRIMARY KEY, frequency TEXT NOT NULL CHECK(frequency IN ('daily', 'weekly')), "
+            "interval_days INTEGER NOT NULL CHECK(interval_days > 0), end_date TEXT, "
+            "active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)), created_at TEXT NOT NULL)"
+        )
+        legacy.execute(
+            "INSERT INTO task_recurrence_rules SELECT id, frequency, interval_days, end_date, active, created_at FROM extended_rules"
+        )
+        legacy.execute("DROP TABLE extended_rules")
+        legacy.execute("PRAGMA user_version = 15")
+    init_db()
+    init_db()
+    with sqlite3.connect(database) as check:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 16
+        assert (
+            check.execute(
+                "SELECT id, frequency, interval_days, end_date, active, created_at FROM task_recurrence_rules ORDER BY id"
+            ).fetchall()
+            == expected
+        )
+        assert check.execute(
+            "SELECT weekdays, month_day FROM task_recurrence_rules"
+        ).fetchall() == [("", None), ("", None)]
+        assert check.execute("SELECT recurrence_rule_id FROM items ORDER BY id").fetchall() == [
+            (1,),
+            (2,),
+        ]
+    next_id = complete_task(first)
+    assert next_id is not None
+    assert next(task for task in fetch_tasks() if task["id"] == next_id)["due_date"] == "2026-07-21"
+    assert complete_task(second) is None

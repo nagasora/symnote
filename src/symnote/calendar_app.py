@@ -1,8 +1,10 @@
+"""ローカルタスク・メモと Google 予定の月表示を提供する。"""
+
 from __future__ import annotations
 
 import calendar
 from datetime import date, timedelta
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
@@ -14,9 +16,12 @@ from symnote.core.db import (
     update_item_fields,
 )
 from symnote.views.text import escape_markdown
+from symnote.core.calendar_events import event_bounds, fetch_events
+from symnote.core.calendar_settings import effective_config
+from symnote.core.google_calendar import is_connected
 
 
-def _get_month_range(year: int, month: int) -> tuple[date, date]:
+def _get_month_range(year: int, month: int) -> Tuple[date, date]:
     """その月の開始日と終了日を返す"""
     first_day = date(year, month, 1)
     # 翌月の1日の前日が月末
@@ -28,7 +33,32 @@ def _get_month_range(year: int, month: int) -> tuple[date, date]:
     return first_day, last_day
 
 
+def _google_events_by_day(start: date, end: date) -> Dict[str, List[Dict[str, Any]]]:
+    """月内の Google 予定を日ごとに分け、複数日予定の終了日は排他的に扱う。"""
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    if not is_connected():
+        return grouped
+    config = effective_config()
+    result = fetch_events(start, end + timedelta(days=1), config=config)
+    if result.fetched_at:
+        st.caption(f"Google 予定の最終取得: {result.fetched_at}" + ("（保存済み）" if result.cached else ""))
+    if result.offline:
+        st.warning(result.message)
+    for event in result.events:
+        try:
+            begin, finish = event_bounds(event, config.google_calendar_timezone)
+        except (KeyError, ValueError, TypeError):
+            continue
+        day = max(start, begin.date())
+        last = min(end, (finish - timedelta(microseconds=1)).date())
+        while day <= last:
+            grouped.setdefault(day.isoformat(), []).append(event)
+            day += timedelta(days=1)
+    return grouped
+
+
 def render_calendar_tab() -> None:
+    """月ナビゲーションと日別のタスク・メモ・Google 予定を表示する。"""
     st.subheader("🗓️ カレンダー")
 
     # Session State for Calendar Navigation
@@ -68,6 +98,7 @@ def render_calendar_tab() -> None:
     year = st.session_state.cal_year
     month = st.session_state.cal_month
     start_date, end_date = _get_month_range(year, month)
+    google_events = _google_events_by_day(start_date, end_date)
     
     # Fetch counts
     counts = {}
@@ -113,6 +144,8 @@ def render_calendar_tab() -> None:
                         st.session_state["selected_calendar_date"] = d_str
                         st.rerun()
                     
+                    if google_events.get(d_str):
+                        st.caption(f"Google予定: {len(google_events[d_str])}")
                     c = counts.get(d_str, {"task": 0, "memo": 0, "due": 0})
                     if c["task"] > 0 or c["memo"] > 0 or c["due"] > 0:
                         info = []
@@ -130,6 +163,11 @@ def render_calendar_tab() -> None:
     target_date_str = st.session_state.get("selected_calendar_date", date.today().isoformat())
     st.markdown(f"### {target_date_str} の詳細")
     
+    for event in google_events.get(target_date_str, []):
+        start = event.get("start", {})
+        label = "終日" if "date" in start else event_bounds(event, effective_config().google_calendar_timezone)[0].strftime("%H:%M")
+        st.markdown(f"**Google 予定 / {label}** {escape_markdown(str(event.get('summary') or '（無題）'))}")
+
     # Tasks belong to calendar dates through ``due_date``.  The legacy ``date``
     # field is their creation date, so only non-task items are retrieved by it.
     created_items = [

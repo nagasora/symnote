@@ -13,6 +13,9 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       DB_PATH: /data/symnote.db
+      # ポートを 127.0.0.1 にだけ公開しているため、パスコード無しでの表示を許可する。
+      # 外部に公開する構成に変える場合はこの行を消し、SYMNOTE_APP_PASSCODE を設定すること。
+      SYMNOTE_ALLOW_NO_PASSCODE: "1"
     restart: unless-stopped
 
 volumes:

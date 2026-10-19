@@ -1,8 +1,7 @@
-"""One-way, retryable Google Calendar delivery for local SymNote tasks.
+"""ローカルタスクを原本として Google Calendar の認証と冪等な書き出しを扱う。
 
-The SQLite database remains authoritative.  This module only sends tasks that
-were queued in the local outbox, so losing network access never prevents task
-creation or editing.
+予定の読み取りは短時間キャッシュを使い、ネットワーク障害時もローカルの
+タスク作成・編集を妨げない。
 """
 
 from __future__ import annotations
@@ -15,10 +14,13 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from symnote.config import AppConfig, load_config
+from symnote.config import AppConfig
 from symnote.core.db import connection, fetch_tasks_for_morning_digest
 
-SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+]
 KEYRING_SERVICE = "symnote-google-calendar"
 KEYRING_USERNAME = "default"
 
@@ -29,6 +31,8 @@ class CalendarSetupError(RuntimeError):
 
 @dataclass(frozen=True)
 class SyncResult:
+    """同期成功・失敗・再試行待ち件数を返す。"""
+
     synced: int = 0
     failed: int = 0
     pending: int = 0
@@ -44,12 +48,13 @@ def _keyring() -> Any:
 
 
 def _load_credentials() -> Any | None:
+    """保存済みの承認 scope を維持して認証情報を復元する。"""
     payload = _keyring().get_password(KEYRING_SERVICE, KEYRING_USERNAME)
     if not payload:
         return None
     from google.oauth2.credentials import Credentials
 
-    return Credentials.from_authorized_user_info(json.loads(payload), SCOPES)
+    return Credentials.from_authorized_user_info(json.loads(payload))
 
 
 def is_connected() -> bool:
@@ -61,8 +66,14 @@ def is_connected() -> bool:
 
 
 def connect(config: AppConfig | None = None) -> None:
-    """Run Desktop OAuth and retain the refresh token in the OS credential vault."""
-    config = config or load_config()
+    """Desktop OAuth を実行し、更新トークンを OS の資格情報ストアに保存する。"""
+    from symnote.core.runtime import CalendarWriteBlocked, is_test_mode
+
+    if is_test_mode():
+        raise CalendarWriteBlocked("テスト環境では本番と共有の Google 接続を変更しません。")
+    from symnote.core.calendar_settings import effective_config
+
+    config = effective_config(config)
     client_file = Path(config.google_calendar_client_secret_path).expanduser()
     if not client_file.is_file():
         raise CalendarSetupError(
@@ -78,10 +89,16 @@ def connect(config: AppConfig | None = None) -> None:
         port=0, open_browser=True
     )
     _keyring().set_password(KEYRING_SERVICE, KEYRING_USERNAME, credentials.to_json())
+    with connection() as conn, conn:
+        conn.execute("DELETE FROM calendar_event_cache")
 
 
 def disconnect() -> None:
     """Remove locally retained OAuth credentials; calendar events are untouched."""
+    from symnote.core.runtime import CalendarWriteBlocked, is_test_mode
+
+    if is_test_mode():
+        raise CalendarWriteBlocked("テスト環境では本番と共有の Google 接続を変更しません。")
     _keyring().delete_password(KEYRING_SERVICE, KEYRING_USERNAME)
 
 
@@ -97,7 +114,10 @@ def _calendar_service() -> Any:
         _keyring().set_password(KEYRING_SERVICE, KEYRING_USERNAME, credentials.to_json())
     if not credentials.valid:
         raise CalendarSetupError("Google Calendar の認証が期限切れです。再接続してください。")
-    return build("calendar", "v3", credentials=credentials, cache_discovery=False)
+    service = build("calendar", "v3", credentials=credentials, cache_discovery=False)
+    from symnote.core.runtime import ReadOnlyCalendarService, is_test_mode
+
+    return ReadOnlyCalendarService(service) if is_test_mode() else service
 
 
 def task_event_payload(
@@ -106,10 +126,9 @@ def task_event_payload(
     deadline_hour: int = 9,
     timezone: str = "Asia/Tokyo",
 ) -> dict[str, Any] | None:
-    """Represent a task deadline as a timed Calendar reminder.
+    """タスクの期限を予定にする。時刻があれば 30 分の予定、日付だけなら終日の予定。
 
-    Calendar applies the popup reminder to this all-day event.  The event body
-    deliberately contains the local task ID for safe, local-wins reconciliation.
+    本文にローカルのタスク ID を持たせ、ローカル優先で安全に照合できるようにする。
     """
     due = task.get("due_date")
     if not due or task.get("status") == "done":
@@ -122,28 +141,30 @@ def task_event_payload(
         due_time = dt.time.fromisoformat(task["due_time"]) if task.get("due_time") else None
     except (TypeError, ValueError):
         due_time = None
-    start = dt.datetime.combine(
-        due_day,
-        due_time or dt.time(hour=max(0, min(23, deadline_hour))),
-    )
-    end = start + dt.timedelta(minutes=30)
     title = (task.get("tags") or task.get("raw_text") or "SymNote task").strip()
     description = task.get("raw_text", "").strip()
+    if due_time is None:
+        # 期限時刻の無いタスクを deadline_hour の時間指定予定にすると、空き時間を塞いで見える。
+        timing: dict[str, Any] = {
+            "start": {"date": due_day.isoformat()},
+            "end": {"date": (due_day + dt.timedelta(days=1)).isoformat()},
+            "reminders": {"useDefault": False, "overrides": []},
+        }
+    else:
+        start = dt.datetime.combine(due_day, due_time)
+        end = start + dt.timedelta(minutes=30)
+        timing = {
+            "start": {"dateTime": start.isoformat(timespec="seconds"), "timeZone": timezone},
+            "end": {"dateTime": end.isoformat(timespec="seconds"), "timeZone": timezone},
+            "reminders": {
+                "useDefault": False,
+                "overrides": [{"method": "popup", "minutes": max(0, reminder_minutes)}],
+            },
+        }
     return {
         "summary": title,
         "description": description,
-        "start": {
-            "dateTime": start.isoformat(timespec="seconds"),
-            "timeZone": timezone,
-        },
-        "end": {
-            "dateTime": end.isoformat(timespec="seconds"),
-            "timeZone": timezone,
-        },
-        "reminders": {
-            "useDefault": False,
-            "overrides": [{"method": "popup", "minutes": max(0, reminder_minutes)}],
-        },
+        **timing,
         "extendedProperties": {"private": {"symnote_task_id": str(task["id"])}},
     }
 
@@ -332,31 +353,6 @@ def _delete_morning_digest_mapping(digest_date: str) -> None:
         )
 
 
-def _discard_task_outbox() -> None:
-    """タスク単位の送信待ちを手元で破棄する。
-
-    タスクごとの予定は作らない仕様になったため、outbox は送る先が無い。
-    _queue_calendar_sync の書き込み自体を止めないのは、多数の更新経路に手を入れずに
-    済ませるため（行はここで毎回片付くので肥大化しない）。
-    """
-    with connection() as conn, conn:
-        conn.execute("DELETE FROM calendar_sync_outbox")
-
-
-def _legacy_task_event_rows() -> list[dict[str, Any]]:
-    """旧仕様で作られたタスク単位の予定（削除対象）を返す。"""
-    with connection() as conn:
-        rows = conn.execute(
-            "SELECT task_id, event_id FROM calendar_task_sync ORDER BY task_id"
-        ).fetchall()
-        return [dict(row) for row in rows]
-
-
-def _forget_legacy_task_event(task_id: int) -> None:
-    with connection() as conn, conn:
-        conn.execute("DELETE FROM calendar_task_sync WHERE task_id = ?", (task_id,))
-
-
 def _http_status(error: Exception) -> int | None:
     """Google API エラーの HTTP ステータスを返す。取れなければ None。"""
     return getattr(getattr(error, "resp", None), "status", None)
@@ -398,34 +394,28 @@ def sync_pending_tasks(
     *,
     today: dt.date | None = None,
 ) -> SyncResult:
-    """Deliver the same-day digest and remove legacy per-task Calendar events."""
-    config = config or load_config()
-    _discard_task_outbox()
-    legacy_rows = _legacy_task_event_rows()
+    """朝のまとめと任意の個別予定を同期し、失敗した操作は再試行できるようにする。"""
+    from symnote.core.calendar_settings import effective_config
+    from symnote.core.calendar_task_export import sync_task_events
+    from symnote.core.runtime import is_test_mode
+
+    if is_test_mode():
+        return SyncResult(message="テスト環境のため、Google カレンダーへは同期しません。")
+    config = effective_config(config)
+    task_result = sync_task_events(config, service_factory or _calendar_service)
     digest_operations = _morning_digest_operations(
         config, today or today_in_timezone(config.google_calendar_timezone)
     )
-    if not legacy_rows and not digest_operations:
-        return SyncResult(message="同期する変更はありません。")
+    if not digest_operations:
+        return task_result if task_result.synced or task_result.failed else SyncResult(message="同期する変更はありません。")
     try:
         service = (service_factory or _calendar_service)()
     except Exception as exc:
-        pending = len(legacy_rows) + len(digest_operations)
-        return SyncResult(failed=pending, pending=pending, message=str(exc))
+        pending = len(digest_operations) + task_result.failed
+        return SyncResult(synced=task_result.synced, failed=pending, pending=pending, message=str(exc))
 
-    synced = failed = 0
-    failure_message = ""
-    for row in legacy_rows:
-        try:
-            if row["event_id"]:
-                # 旧仕様の予定がどのカレンダーにあるかは記録が無いため、現在の設定先を対象にする。
-                _delete_event(service, config.google_calendar_id, row["event_id"])
-            _forget_legacy_task_event(row["task_id"])
-            synced += 1
-        except Exception as exc:
-            failed += 1
-            if not failure_message:
-                failure_message = str(exc)
+    synced, failed = task_result.synced, task_result.failed
+    failure_message = task_result.message
     for operation in digest_operations:
         digest_date = operation["digest_date"]
         calendar_id = operation["calendar_id"]
@@ -465,3 +455,6 @@ def sync_pending_tasks(
         pending=failed,
         message=failure_message,
     )
+
+
+from symnote.core.calendar_events import fetch_events, propose_prep_tasks_from_events  # noqa: E402,F401

@@ -76,8 +76,8 @@ def test_approved_external_text_stays_escaped_on_task_screens(monkeypatch, tmp_p
     assert not any("](https://evil" in value for value in rendered)
 
 
-def test_today_top3_heading_uses_single_line_title(monkeypatch, tmp_path) -> None:
-    """承認したタスクの本文が複数行でも、トップ3の見出しはタイトル 1 行の太字になる。"""
+def test_home_task_heading_uses_single_line_title(monkeypatch, tmp_path) -> None:
+    """承認したタスクの本文が複数行でも、ホームの一覧の見出しはタイトル 1 行になる。"""
     from symnote.core.candidates import approve_candidate
 
     monkeypatch.setenv("DB_PATH", str(tmp_path / "heading.db"))
@@ -92,4 +92,6 @@ def test_today_top3_heading_uses_single_line_title(monkeypatch, tmp_path) -> Non
     app.run()
 
     assert not app.exception
-    assert "**1. 見積書に返信する**" in [block.value for block in app.markdown]
+    headings = [block.value for block in app.markdown if "見積書に返信する" in block.value]
+    assert headings
+    assert all("\n" not in heading for heading in headings)

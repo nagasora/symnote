@@ -119,7 +119,7 @@ def test_task_form_creates_open_ended_recurrence(monkeypatch, tmp_path) -> None:
 
     app.text_input[0].set_value("ゼミ準備")
     app.text_area[0].set_value("毎週のゼミ資料を確認する")
-    app.selectbox[0].set_value("毎週")
+    next(s for s in app.selectbox if s.label == "繰り返し").set_value("毎週")
     next(b for b in app.button if b.label == "タスクを保存").click().run()
 
     assert not app.exception

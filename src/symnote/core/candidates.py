@@ -129,15 +129,29 @@ def validate_candidate(
     )
 
 
-def propose_candidates(candidates: Sequence[CandidateInput]) -> ProposalResult:
-    """候補をまとめて承認待ちに登録する。同じ出典・タイトルの候補は重複として無視する。"""
+def propose_candidates(
+    candidates: Sequence[CandidateInput], *, deduplicate_source_ref: bool = False,
+) -> ProposalResult:
+    """候補を承認待ちに登録し、同じ出典・タイトルの候補は重複として無視する。
+
+    deduplicate_source_ref が真ならタイトル変更後も同じ出典 ID を重複扱いにする。
+    この判定は書き込みロック下で行い、並列提案による二重登録を防ぐ。
+    """
     if len(candidates) > MAX_CANDIDATES_PER_PROPOSAL:
         raise ValueError(f"一度に提案できる候補は {MAX_CANDIDATES_PER_PROPOSAL} 件までです。")
     now = dt.datetime.now().isoformat(timespec="seconds")
     created: List[int] = []
     duplicates = 0
     with connection() as conn, conn:
+        if deduplicate_source_ref:
+            conn.execute("BEGIN IMMEDIATE")
         for candidate in candidates:
+            if deduplicate_source_ref and conn.execute(
+                "SELECT 1 FROM task_candidates WHERE source = ? AND source_ref = ? LIMIT 1",
+                (candidate.source, candidate.source_ref),
+            ).fetchone():
+                duplicates += 1
+                continue
             cur = conn.execute(
                 """
                 INSERT INTO task_candidates (

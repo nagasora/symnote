@@ -1,3 +1,5 @@
+"""SQLite にタスクとメモを保存し、版管理された移行を提供する。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,6 +10,7 @@ import datetime as dt
 import sqlite3
 
 from symnote.config import load_config
+from symnote.core.recurrence import RecurrenceRule, first_occurrence, next_occurrence, rule_label
 
 if TYPE_CHECKING:
     # 型注釈専用。実行時に nlp を読み込むと Gemini SDK の読み込みで起動が数秒以上遅れ、
@@ -17,7 +20,7 @@ if TYPE_CHECKING:
 
 ItemRow = Dict[str, Any]
 SQLITE_BUSY_TIMEOUT_MS = 5_000
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 16
 
 
 @contextmanager
@@ -198,6 +201,237 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
         if "calendar_id" not in columns:
             conn.execute("ALTER TABLE calendar_morning_digest_sync ADD COLUMN calendar_id TEXT")
         conn.execute("PRAGMA user_version = 10")
+        current = 10
+    if current < 11:
+        # claude.ai などのリモート MCP クライアントの登録情報と発行済みトークン。
+        # トークンは平文で持たず SHA-256 で照合し、DB が漏れても再利用されないようにする。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS oauth_clients (
+              client_id TEXT PRIMARY KEY,
+              client_info TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS oauth_tokens (
+              token_hash TEXT PRIMARY KEY,
+              kind TEXT NOT NULL CHECK(kind IN ('access', 'refresh')),
+              client_id TEXT NOT NULL REFERENCES oauth_clients(client_id) ON DELETE CASCADE,
+              scopes TEXT NOT NULL DEFAULT '',
+              resource TEXT,
+              expires_at INTEGER NOT NULL,
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_oauth_tokens_client ON oauth_tokens(client_id, kind)"
+        )
+        conn.execute("PRAGMA user_version = 11")
+        current = 11
+    if current < 12:
+        # 使用済みリフレッシュトークンを消さずに印を付け、
+        # 再提示（盗用の兆候）を検知できるようにする。
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(oauth_tokens)")}
+        if "consumed_at" not in columns:
+            conn.execute("ALTER TABLE oauth_tokens ADD COLUMN consumed_at INTEGER")
+        conn.execute("PRAGMA user_version = 12")
+        current = 12
+    if current < 13:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS calendar_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS calendar_event_cache (
+              calendar_id TEXT NOT NULL, range_start TEXT NOT NULL, range_end TEXT NOT NULL,
+              fetched_at TEXT NOT NULL, payload TEXT NOT NULL,
+              PRIMARY KEY(calendar_id, range_start, range_end)
+            )
+            """
+        )
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(calendar_task_sync)")}
+        for name in ("calendar_id", "content_hash"):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE calendar_task_sync ADD COLUMN {name} TEXT")
+        conn.execute("PRAGMA user_version = 13")
+        current = 13
+    if current < 14:
+        # ゴールツリー：すべてのタスクを「なぜやるか」に結び付け、並行する仕事を一目で追えるようにする。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS goals (
+              id INTEGER PRIMARY KEY,
+              parent_id INTEGER REFERENCES goals(id) ON DELETE CASCADE,
+              title TEXT NOT NULL,
+              why TEXT NOT NULL DEFAULT '',
+              success_criteria TEXT NOT NULL DEFAULT '',
+              target_date TEXT,
+              status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'done', 'archived')),
+              order_index INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_goals_parent ON goals(parent_id)")
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
+        # Why not 外部キー付きの列: SQLite の ALTER TABLE ADD COLUMN では ON DELETE を後付けできず、
+        # ゴール削除時の付け替えは goals モジュールで明示的に行う。
+        if "goal_id" not in columns:
+            conn.execute("ALTER TABLE items ADD COLUMN goal_id INTEGER")
+        if "estimate_minutes" not in columns:
+            conn.execute("ALTER TABLE items ADD COLUMN estimate_minutes INTEGER")
+        if "completed_at" not in columns:
+            conn.execute("ALTER TABLE items ADD COLUMN completed_at TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_items_goal ON items(goal_id)")
+        # クエスト（ゲーム要素）：完了 1 件につき 1 行。task_id を一意にして二重付与を防ぐ。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS quest_log (
+              id INTEGER PRIMARY KEY,
+              task_id INTEGER NOT NULL UNIQUE,
+              title TEXT NOT NULL,
+              xp INTEGER NOT NULL CHECK(xp >= 0),
+              gold INTEGER NOT NULL CHECK(gold >= 0),
+              bonus TEXT NOT NULL DEFAULT '',
+              completed_at TEXT NOT NULL,
+              seen INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_quest_log_completed ON quest_log(completed_at)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rewards (
+              id INTEGER PRIMARY KEY,
+              title TEXT NOT NULL,
+              cost INTEGER NOT NULL CHECK(cost > 0),
+              icon TEXT NOT NULL DEFAULT '🎁',
+              active INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reward_redemptions (
+              id INTEGER PRIMARY KEY,
+              reward_id INTEGER NOT NULL REFERENCES rewards(id),
+              title TEXT NOT NULL,
+              cost INTEGER NOT NULL CHECK(cost > 0),
+              redeemed_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS achievements (
+              code TEXT PRIMARY KEY,
+              unlocked_at TEXT NOT NULL,
+              seen INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        # 秘書キャラクターなどアプリ全体の小さな設定（キー・値）。
+        conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS secretary_messages (
+              id INTEGER PRIMARY KEY,
+              role TEXT NOT NULL CHECK(role IN ('user', 'secretary')),
+              content TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("PRAGMA user_version = 14")
+        current = 14
+    if current < 15:
+        # 時間割：見積もりとカレンダーの空きから組んだ今日のブロック。承認後にカレンダーへ書き出せる。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS time_blocks (
+              id INTEGER PRIMARY KEY,
+              day TEXT NOT NULL,
+              task_id INTEGER,
+              title TEXT NOT NULL,
+              start_time TEXT NOT NULL,
+              end_time TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned', 'exported', 'cancelled')),
+              calendar_event_id TEXT,
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_time_blocks_day ON time_blocks(day)")
+        # フォーカスモード：1 回の集中セッション。完走したらクエスト報酬にボーナスを足す。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS focus_sessions (
+              id INTEGER PRIMARY KEY,
+              task_id INTEGER,
+              title TEXT NOT NULL,
+              planned_minutes INTEGER NOT NULL CHECK(planned_minutes > 0),
+              started_at TEXT NOT NULL,
+              ended_at TEXT,
+              outcome TEXT CHECK(outcome IN ('done', 'stopped')),
+              bonus_xp INTEGER NOT NULL DEFAULT 0 CHECK(bonus_xp >= 0),
+              bonus_gold INTEGER NOT NULL DEFAULT 0 CHECK(bonus_gold >= 0)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_focus_sessions_started ON focus_sessions(started_at)")
+        # AI エージェントからの進捗報告。人が承認したものだけをタスク・ゴールへ反映する。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_reports (
+              id INTEGER PRIMARY KEY,
+              task_id INTEGER,
+              goal_id INTEGER,
+              agent TEXT NOT NULL DEFAULT '',
+              summary TEXT NOT NULL,
+              details TEXT NOT NULL DEFAULT '',
+              suggested_status TEXT NOT NULL DEFAULT 'progress'
+                CHECK(suggested_status IN ('progress', 'done', 'blocked')),
+              status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'approved', 'rejected')),
+              created_at TEXT NOT NULL,
+              reviewed_at TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_reports_status ON agent_reports(status)")
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(items)")}
+        if "delegated_to" not in columns:
+            conn.execute("ALTER TABLE items ADD COLUMN delegated_to TEXT")
+        conn.execute("PRAGMA user_version = 15")
+        current = 15
+    if current < 16:
+        conn.execute(
+            """
+            CREATE TABLE task_recurrence_rules_v16 (
+              id INTEGER PRIMARY KEY,
+              frequency TEXT NOT NULL CHECK(frequency IN ('daily', 'weekly', 'weekdays', 'monthly', 'custom')),
+              interval_days INTEGER NOT NULL CHECK(interval_days > 0),
+              end_date TEXT,
+              active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+              created_at TEXT NOT NULL,
+              weekdays TEXT NOT NULL DEFAULT '',
+              month_day INTEGER CHECK(month_day BETWEEN 1 AND 31)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO task_recurrence_rules_v16 "
+            "(id, frequency, interval_days, end_date, active, created_at) "
+            "SELECT id, frequency, interval_days, end_date, active, created_at FROM task_recurrence_rules"
+        )
+        conn.execute("DROP TABLE task_recurrence_rules")
+        conn.execute("ALTER TABLE task_recurrence_rules_v16 RENAME TO task_recurrence_rules")
+        conn.execute("PRAGMA user_version = 16")
 
 
 def init_db() -> None:
@@ -405,11 +639,20 @@ def create_recurring_task(
     status: str = "inbox",
     due_time: Optional[str] = None,
     end_date: Optional[str] = None,
+    weekdays: Tuple[int, ...] = (),
+    month_day: Optional[int] = None,
 ) -> int:
-    """Create the first occurrence of a daily, weekly, or biweekly task."""
-    if frequency not in {"daily", "weekly"} or interval < 1:
-        raise ValueError("Unsupported recurrence rule")
+    """繰り返し規則と最初のタスクを同一トランザクションで作成する。"""
     start_date = dt.date.fromisoformat(due_date)
+    interval_days = interval * 7 if frequency == "weekly" else interval
+    rule_settings = RecurrenceRule(
+        frequency,
+        interval_days,
+        weekdays,
+        (start_date.day if month_day is None else month_day) if frequency == "monthly" else None,
+    )
+    start_date = first_occurrence(start_date, rule_settings)
+    due_date = start_date.isoformat()
     if due_time:
         try:
             due_time = dt.time.fromisoformat(due_time).strftime("%H:%M")
@@ -420,14 +663,20 @@ def create_recurring_task(
         if recurrence_end < start_date:
             raise ValueError("end_date must not be before due_date")
     now = dt.datetime.now().isoformat(timespec="seconds")
-    interval_days = interval if frequency == "daily" else interval * 7
     with connection() as conn, conn:
         rule = conn.execute(
             """
-            INSERT INTO task_recurrence_rules (frequency, interval_days, end_date, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO task_recurrence_rules (frequency, interval_days, end_date, created_at, weekdays, month_day)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (frequency, interval_days, end_date, now),
+            (
+                frequency,
+                interval_days,
+                end_date,
+                now,
+                ",".join(map(str, sorted(set(weekdays)))),
+                rule_settings.month_day,
+            ),
         )
         rule_id = int(rule.lastrowid)
         cur = conn.execute(
@@ -446,21 +695,77 @@ def create_recurring_task(
 
 
 def recurrence_label(task: ItemRow) -> Optional[str]:
-    """Return a compact user-facing cadence label for a task occurrence."""
+    """停止状態も含めた繰り返し規則の表示名を返す。"""
     interval_days = task.get("recurrence_interval_days")
     if not interval_days:
         return None
-    if interval_days == 1:
-        label = "毎日"
-    elif interval_days == 7:
-        label = "毎週"
-    elif interval_days == 14:
-        label = "隔週"
-    else:
-        label = f"{interval_days}日ごと"
+    rule = RecurrenceRule(
+        task.get("recurrence_frequency") or ("weekly" if interval_days in (7, 14) else "daily"),
+        interval_days,
+        tuple(int(day) for day in (task.get("recurrence_weekdays") or "").split(",") if day),
+        task.get("recurrence_month_day"),
+    )
+    label = rule_label(rule)
     if end_date := task.get("recurrence_end_date"):
-        return f"{label}（{end_date}まで）"
+        label += f"（{end_date}まで）"
+    if task.get("recurrence_active") == 0:
+        label += "（停止中）"
     return label
+
+
+def _set_task_recurrence_in_transaction(
+    conn: sqlite3.Connection,
+    item_id: int,
+    rule: Optional[RecurrenceRule],
+    end_date: Optional[str] = None,
+) -> None:
+    """履歴との関連を維持し、既存タスクの規則を設定・変更・停止する。"""
+    task = conn.execute("SELECT * FROM items WHERE id = ? AND kind = 'task'", (item_id,)).fetchone()
+    if not task:
+        raise ValueError("タスクが見つかりません。")
+    rule_id = task["recurrence_rule_id"]
+    if rule is None:
+        if rule_id:
+            conn.execute("UPDATE task_recurrence_rules SET active = 0 WHERE id = ?", (rule_id,))
+        return
+    due = first_occurrence(
+        dt.date.fromisoformat(task["due_date"]) if task["due_date"] else dt.date.today(), rule
+    )
+    if end_date and dt.date.fromisoformat(end_date) < due:
+        raise ValueError("繰り返し終了日は最初の期限日以降にしてください。")
+    values = (
+        rule.frequency,
+        rule.interval_days,
+        end_date,
+        ",".join(map(str, sorted(set(rule.weekdays)))),
+        rule.month_day,
+    )
+    if rule_id:
+        conn.execute(
+            "UPDATE task_recurrence_rules SET frequency=?, interval_days=?, end_date=?, weekdays=?, month_day=?, active=1 WHERE id=?",
+            (*values, rule_id),
+        )
+    else:
+        cur = conn.execute(
+            "INSERT INTO task_recurrence_rules (frequency, interval_days, end_date, weekdays, month_day, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (*values, dt.datetime.now().isoformat(timespec="seconds")),
+        )
+        rule_id = int(cur.lastrowid)
+    conn.execute(
+        "UPDATE items SET recurrence_rule_id=?, due_date=? WHERE id=?",
+        (rule_id, due.isoformat(), item_id),
+    )
+    _queue_calendar_sync(conn, item_id, "upsert")
+
+
+def set_task_recurrence(
+    item_id: int,
+    rule: Optional[RecurrenceRule],
+    end_date: Optional[str] = None,
+) -> None:
+    """単発タスクの繰り返し化、既存規則の変更、停止を原子的に保存する。"""
+    with connection() as conn, conn:
+        _set_task_recurrence_in_transaction(conn, item_id, rule, end_date)
 
 
 def complete_task(item_id: int) -> Optional[int]:
@@ -470,17 +775,27 @@ def complete_task(item_id: int) -> Optional[int]:
 
 
 def _complete_task_in_transaction(conn: sqlite3.Connection, item_id: int) -> Optional[int]:
-    """呼び出し側のトランザクション内でタスクを完了し、繰り返しの次回分を作成する。"""
+    """完了日時・報酬・次回分を原子的に保存する。完了を取り消しても報酬は返還しない。"""
+    from symnote.core.quest import award_for_completion_in_transaction
+
     task = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
     if not task or task["kind"] != "task" or task["status"] == "done":
         return None
-    conn.execute("UPDATE items SET status = 'done' WHERE id = ?", (item_id,))
+    completed_at = dt.datetime.now().isoformat(timespec="seconds")
+    conn.execute("UPDATE items SET status = 'done', completed_at = ? WHERE id = ?", (completed_at, item_id))
+    completed_task = dict(task)
+    completed_task["completed_at"] = completed_at
+    award_for_completion_in_transaction(conn, completed_task)
     _queue_calendar_sync(conn, item_id, "upsert")
+    from symnote.core.timeblock import cancel_blocks_for_task
+
+    # 終わった枠は「やった記録」として残し、まだ来ていない枠だけ空ける。
+    cancel_blocks_for_task(item_id, conn=conn, upcoming_only=True)
     rule_id = task["recurrence_rule_id"]
     if rule_id is None:
         return None
     rule = conn.execute(
-        "SELECT interval_days, end_date FROM task_recurrence_rules WHERE id = ? AND active = 1",
+        "SELECT * FROM task_recurrence_rules WHERE id = ? AND active = 1",
         (rule_id,),
     ).fetchone()
     if not rule:
@@ -489,7 +804,11 @@ def _complete_task_in_transaction(conn: sqlite3.Connection, item_id: int) -> Opt
         base_due = dt.date.fromisoformat(task["due_date"] or dt.date.today().isoformat())
     except ValueError:
         base_due = dt.date.today()
-    next_due = (base_due + dt.timedelta(days=rule["interval_days"])).isoformat()
+    settings = RecurrenceRule(
+        rule["frequency"], rule["interval_days"],
+        tuple(int(day) for day in rule["weekdays"].split(",") if day), rule["month_day"],
+    )
+    next_due = next_occurrence(base_due, settings).isoformat()
     if rule["end_date"] and next_due > rule["end_date"]:
         conn.execute("UPDATE task_recurrence_rules SET active = 0 WHERE id = ?", (rule_id,))
         return None
@@ -505,8 +824,8 @@ def _complete_task_in_transaction(conn: sqlite3.Connection, item_id: int) -> Opt
         INSERT INTO items (
           created_at, date, due_date, due_time, kind, raw_text, ai_category,
           importance, urgency, effort, energy, status, tags, embedding,
-          recurrence_rule_id
-        ) VALUES (?, ?, ?, ?, 'task', ?, ?, ?, ?, ?, ?, 'inbox', ?, NULL, ?)
+          recurrence_rule_id, goal_id, estimate_minutes
+        ) VALUES (?, ?, ?, ?, 'task', ?, ?, ?, ?, ?, ?, 'inbox', ?, NULL, ?, ?, ?)
         """,
         (
             now,
@@ -521,6 +840,8 @@ def _complete_task_in_transaction(conn: sqlite3.Connection, item_id: int) -> Opt
             task["energy"],
             task["tags"],
             rule_id,
+            task["goal_id"] if "goal_id" in task.keys() else None,
+            task["estimate_minutes"] if "estimate_minutes" in task.keys() else None,
         ),
     )
     next_id = int(cur.lastrowid)
@@ -556,6 +877,34 @@ def insert_standalone_memo(
     )
 
 
+def _detach_task_references(conn: sqlite3.Connection, task_id: int) -> None:
+    """削除するタスクへの報告・集中セッションを、同じ ID の新タスクに誤って効かないよう切り離す。"""
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    conn.execute(
+        "UPDATE agent_reports SET status = 'rejected', reviewed_at = ? WHERE task_id = ? AND status = 'pending'",
+        (now, task_id),
+    )
+    conn.execute(
+        "UPDATE focus_sessions SET ended_at = ?, outcome = 'stopped' WHERE task_id = ? AND ended_at IS NULL",
+        (now, task_id),
+    )
+    for table in ("agent_reports", "focus_sessions"):
+        conn.execute(f"UPDATE {table} SET task_id = -task_id WHERE task_id = ?", (task_id,))
+
+
+def detach_goal_references(conn: sqlite3.Connection, goal_ids: Sequence[int]) -> None:
+    """削除するゴールへの承認待ち報告を却下し、同じ ID の新ゴールへ反映されないようにする。"""
+    if not goal_ids:
+        return
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    marks = ",".join("?" for _ in goal_ids)
+    conn.execute(
+        f"UPDATE agent_reports SET status = 'rejected', reviewed_at = ? WHERE goal_id IN ({marks}) AND status = 'pending'",
+        [now, *goal_ids],
+    )
+    conn.execute(f"UPDATE agent_reports SET goal_id = -goal_id WHERE goal_id IN ({marks})", list(goal_ids))
+
+
 def delete_item(item_id: int) -> None:
     """アイテムを削除する。"""
     with connection() as conn, conn:
@@ -564,6 +913,16 @@ def delete_item(item_id: int) -> None:
             # Retain the event mapping after the local task disappears so an
             # interrupted/offline delete is retried on the next sync.
             _queue_calendar_sync(conn, item_id, "delete")
+            # items.id は削除後に再利用されうる。獲得済みの報酬履歴は残しつつ、同じ ID の
+            # 新しいタスクの付与を妨げないよう、履歴側の task_id を負の値（再利用されない）へ退避する。
+            conn.execute(
+                "UPDATE quest_log SET task_id = -id WHERE task_id = ?",
+                (item_id,),
+            )
+            _detach_task_references(conn, item_id)
+            from symnote.core.timeblock import cancel_blocks_for_task
+
+            cancel_blocks_for_task(item_id, conn=conn)
         conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
 
 
@@ -608,7 +967,10 @@ def fetch_tasks(
         "SELECT i.id, i.kind, i.created_at, i.date, i.due_date, i.due_time, i.raw_text, i.tags,",
         "i.ai_category,",
         "i.importance, i.urgency, i.effort, i.energy, i.status, i.recurrence_rule_id,",
-        "r.interval_days AS recurrence_interval_days, r.end_date AS recurrence_end_date",
+        "i.goal_id, i.estimate_minutes, i.delegated_to,",
+        "r.interval_days AS recurrence_interval_days, r.end_date AS recurrence_end_date,",
+        "r.frequency AS recurrence_frequency, r.weekdays AS recurrence_weekdays,",
+        "r.month_day AS recurrence_month_day, r.active AS recurrence_active",
         "FROM items AS i LEFT JOIN task_recurrence_rules AS r ON r.id = i.recurrence_rule_id",
         "WHERE i.kind = 'task'",
     ]
@@ -666,8 +1028,8 @@ def fetch_tasks_for_today_view(today_str: str) -> List[ItemRow]:
     with connection() as conn:
         cur = conn.execute(
         """
-        SELECT id, created_at, date, due_date, raw_text, tags, ai_category,
-               importance, urgency, effort, energy, status
+        SELECT id, created_at, date, due_date, due_time, raw_text, tags, ai_category,
+               importance, urgency, effort, energy, status, goal_id, estimate_minutes, delegated_to
         FROM items
         WHERE kind = 'task'
           AND status != 'done'
@@ -766,6 +1128,7 @@ def update_item_fields(item_id: int, **fields: Any) -> None:
     """任意のカラムを更新する。"""
     if not fields:
         return
+    recurrence_settings = fields.pop("recurrence_settings", None)
     allowed = {
         "ai_category",
         "importance",
@@ -779,6 +1142,7 @@ def update_item_fields(item_id: int, **fields: Any) -> None:
         "date",
         "due_date",
         "due_time",
+        "estimate_minutes",
     }
     updates: List[str] = []
     params: List[Any] = []
@@ -792,12 +1156,15 @@ def update_item_fields(item_id: int, **fields: Any) -> None:
             continue
         updates.append(f"{key} = ?")
         params.append(value)
-    if not updates and not completes:
+    if not updates and not completes and recurrence_settings is None:
         return
     params.append(item_id)
     with connection() as conn, conn:
         if updates:
             conn.execute(f"UPDATE items SET {', '.join(updates)} WHERE id = ?", params)
+        if recurrence_settings is not None:
+            rule, end_date = recurrence_settings
+            _set_task_recurrence_in_transaction(conn, item_id, rule, end_date)
         row = conn.execute("SELECT kind FROM items WHERE id = ?", (item_id,)).fetchone()
         if completes:
             if row and row["kind"] == "task":

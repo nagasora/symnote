@@ -75,7 +75,7 @@ SymNote は個人利用のローカルファーストアプリとして扱う。
 
 ## 今回の改善実装
 
-- Codexの既定モデルとプロジェクトエージェントを `gpt-5.6-terra` に設定。
+- Codexの管理・オーケストレーションを `gpt-5.6-sol` / `high`、実装・レビュー担当を `gpt-5.6-luna` / `max` に設定。
 - UI、Today、Calendar、NLP推薦の期限判定を `due_date` に統一。
 - 既存タスクの `date` を `due_date` に補完する `user_version` 1→3 マイグレーションを追加。
 - DB既定保存先をユーザーデータ領域へ移し、明示的な `DB_PATH` は引き続き利用可能にした。

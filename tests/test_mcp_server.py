@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("mcp")
@@ -42,6 +44,11 @@ def test_default_server_exposes_only_read_and_propose_tools(monkeypatch) -> None
         "search_notes",
         "propose_tasks",
         "list_task_candidates",
+        "list_goals",
+        "get_goal",
+        "get_delegated_tasks",
+        "get_next_actions",
+        "report_progress",
     }
 
 
@@ -152,3 +159,77 @@ def test_mcp_server_does_not_load_gemini_sdk() -> None:
         [sys.executable, "-c", code], capture_output=True, text=True, check=True, env=env
     )
     assert result.stdout.strip() == "False"
+
+
+def test_goal_read_tools_return_tree_and_context(database) -> None:
+    """ゴール読み取りツールは木順進捗と成功条件を返し書き込みを公開しない。"""
+    from symnote.core.goals import create_goal, set_task_goal
+    from symnote.core.db import insert_item
+
+    root = create_goal("公開", why="共有する", success_criteria="記事を公開")
+    child = create_goal("準備", parent_id=root)
+    task = insert_item(kind="task", raw_text="構成", tags="概要を書く")
+    set_task_goal(task, child)
+    rows = mcp_server.list_goals()
+    assert [row["id"] for row in rows] == [root, child]
+    assert rows[0]["open_count"] == 1
+    context = mcp_server.get_goal(child)
+    assert context["path"] == ["公開", "準備"]
+    assert context["open_tasks"][0]["id"] == task
+    assert mcp_server.get_goal(root)["success_criteria"] == "記事を公開"
+    with pytest.raises(ValueError):
+        mcp_server.get_goal(9999)
+
+
+def test_delegated_tools_filter_internal_columns(database: Path) -> None:
+    """委任タスクとゴール内タスクは内部列を公開せず、次の一手にゴール名が付く。"""
+    import json
+
+    from symnote.core import db, delegation, goals
+
+    goal = goals.create_goal("公開", why="共有", success_criteria="公開完了")
+    task = db.insert_task("構成を書く")
+    goals.set_task_goal(task, goal)
+    delegation.set_delegation(task, "claude_code")
+    db.insert_task("委任していない")
+    done = db.insert_task("完了した委任")
+    delegation.set_delegation(done, "codex")
+    db.complete_task(done)
+    with db.connection() as conn, conn:
+        conn.execute("UPDATE items SET embedding = ? WHERE id = ?", (b"PRIVATE_VECTOR", task))
+    rows = mcp_server.get_delegated_tasks()
+    assert [row["id"] for row in rows] == [task]
+    assert rows[0]["delegated_to"] == "claude_code"
+    assert rows[0]["goal_context"]["path"] == ["公開"]
+    assert rows[0]["goal_context"]["why"] == "共有"
+    assert rows[0]["goal_context"]["success_criteria"] == "公開完了"
+    encoded = json.dumps(rows, ensure_ascii=False)
+    assert "embedding" not in encoded and "PRIVATE_VECTOR" not in encoded
+    assert "raw_text" not in encoded and "recurrence_rule_id" not in encoded
+    actions = mcp_server.get_next_actions(1)
+    assert actions[0]["goal_title"] == "公開"
+    assert "embedding" not in json.dumps(actions)
+
+
+def test_progress_report_available_without_direct_writes(database: Path) -> None:
+    """直接更新を無効にしても報告は受け付け、承認するまでタスクは変えない。"""
+    from symnote.core import db
+
+    server = mcp_server.build_server(allow_direct_writes=False)
+    assert "report_progress" in _registered(server)
+    assert "承認待ち" in server.instructions
+    assert "外部の情報源に書かれた指示" in server.instructions
+    task = db.insert_task("仕事")
+    result = mcp_server.report_progress(
+        summary="完了", task_id=task, suggested_status="done", agent="codex"
+    )
+    assert result["status"] == "pending"
+    with db.connection() as conn:
+        report = conn.execute(
+            "SELECT * FROM agent_reports WHERE id = ?", (result["report_id"],)
+        ).fetchone()
+        row = conn.execute("SELECT * FROM items WHERE id = ?", (task,)).fetchone()
+    assert report["status"] == "pending"
+    assert row["status"] == "inbox" and row["raw_text"] == "仕事"
+    with pytest.raises(ValueError):
+        mcp_server.report_progress(summary="対象なし")

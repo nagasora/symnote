@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- claude.ai 向けリモート MCP サーバーを常駐させる LaunchAgent の例。
+     /absolute/path/to/... を自分の環境の絶対パスに置き換えてから使う。
+     SYMNOTE_MCP_PUBLIC_URL / SYMNOTE_MCP_PASSPHRASE は symnote の .env に書いておけば読み込まれる
+     （WorkingDirectory を .env のあるディレクトリにすること）。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.symnote.mcp-remote</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/absolute/path/to/symnote/.venv/bin/python</string>
+    <string>-m</string>
+    <string>symnote.mcp_remote</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/absolute/path/to/symnote</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONPATH</key>
+    <string>/absolute/path/to/symnote/src</string>
+    <key>DB_PATH</key>
+    <string>/absolute/path/to/symnote.db</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/symnote-mcp-remote.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/symnote-mcp-remote.log</string>
+</dict>
+</plist>

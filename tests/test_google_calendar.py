@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import sqlite3
 from datetime import date
 
@@ -12,6 +14,14 @@ from symnote.core.google_calendar import (
     sync_pending_tasks,
     task_event_payload,
 )
+
+
+@pytest.fixture(autouse=True)
+def _task_export_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """個別予定の書き出しを既定 OFF にして、朝のまとめなど他の同期だけを検証できるようにする。"""
+    import symnote.core.calendar_task_export as task_export
+
+    monkeypatch.setattr(task_export, "DEFAULT_EXPORT_TASKS", "0")
 
 
 class _Request:
@@ -55,15 +65,17 @@ class _Service:
         return self.events_api
 
 
-def test_event_payload_is_all_day_and_has_popup_reminder() -> None:
+def test_event_payload_without_time_is_all_day_without_blocking_hours() -> None:
+    """期限日だけのタスクは終日予定になり、時間を塞ぐ通知は付けない。"""
     payload = task_event_payload(
         {"id": 3, "tags": "Ship", "raw_text": "Ship release", "due_date": "2026-07-20", "status": "week"},
         30,
     )
     assert payload is not None
-    assert payload["start"] == {"dateTime": "2026-07-20T09:00:00", "timeZone": "Asia/Tokyo"}
-    assert payload["end"] == {"dateTime": "2026-07-20T09:30:00", "timeZone": "Asia/Tokyo"}
-    assert payload["reminders"]["overrides"] == [{"method": "popup", "minutes": 30}]
+    assert payload["start"] == {"date": "2026-07-20"}
+    assert payload["end"] == {"date": "2026-07-21"}
+    assert payload["reminders"] == {"useDefault": False, "overrides": []}
+    assert payload["extendedProperties"]["private"]["symnote_task_id"] == "3"
 
 
 def test_event_payload_uses_the_task_due_time_when_present() -> None:
@@ -81,6 +93,7 @@ def test_event_payload_uses_the_task_due_time_when_present() -> None:
     assert payload is not None
     assert payload["start"]["dateTime"] == "2026-07-20T14:45:00"
     assert payload["end"]["dateTime"] == "2026-07-20T15:15:00"
+    assert payload["reminders"]["overrides"] == [{"method": "popup", "minutes": 30}]
 
 
 def test_morning_digest_payload_includes_due_today_and_overdue() -> None:

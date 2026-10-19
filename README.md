@@ -21,8 +21,8 @@
 - Python 3.12
 - Streamlit 1.39
 - SQLite (シングルテーブル `items`)
-- LLM: **Gemini 2.0 Flash-Lite**
-- 追加ライブラリ: google-generativeai, python-dotenv, pandas, numpy ほか（`requirements.txt` 参照）
+- LLM: **Gemini**（`LLM_MODEL` で指定、モデル未検出時は `gemini-flash-latest` に切り替え）
+- 追加ライブラリ: google-genai, python-dotenv, pandas, numpy ほか（`requirements.txt` 参照）
 
 ## 開発環境（ローカル）
 ```bash
@@ -38,6 +38,23 @@ cp .env.example .env        # LLM_API_KEY (Gemini) を設定
 
 streamlit run src/symnote/app.py
 ```
+
+## テスト環境（パソコン・スマホで試す）
+
+本番（`http://localhost:8510`）とは別に、本番 DB の複製で動くテスト環境を起動できます。
+
+```bash
+scripts/start_test.sh           # 起動（前回のテスト用 DB を引き継ぐ）
+scripts/start_test.sh --reset   # 本番から複製し直して起動
+scripts/start_test.sh --remote  # 外出先（モバイル回線）からも開ける HTTPS の URL を発行して起動
+scripts/start_test.sh --stop    # 停止（公開 URL も閉じる）
+```
+
+- Finder から `SymNoteテスト環境.command` をダブルクリックしても起動できます。
+- パソコンは `http://localhost:8520`。スマホは同じ Wi-Fi に接続し、表示された `http://<MacのIP>:8520` を開きます（端末に QR コードも出ます）。
+- `--remote` は cloudflared のクイックトンネルで `https://〜.trycloudflare.com` を発行します。Mac が起動している間だけ、Wi-Fi 以外（モバイル回線）のスマホからも開けます。URL は起動のたびに変わり、本番の MCP 用トンネルとは別です。
+- 画面を開くにはパスコード（`data/test/passcode`）が必要です。5 回間違えると 15 分間入力できなくなります。
+- テスト環境での変更は本番に反映されません。Google カレンダーは読むだけで、書き出し・同期・接続の解除はしません。
 
 ## Docker での起動
 ```bash
@@ -87,6 +104,7 @@ SymNote は MCP サーバーとして、Claude Desktop / Claude Code などの A
 | `add_task` / `complete_task` | 直接のタスク登録・完了（**既定では無効**。下記参照） |
 
 承認・削除のツールは公開していません。`add_task` / `complete_task` は、外部情報を読む AI がメール本文などの指示に従って承認を迂回できないよう、既定では公開しません。チャットから直接追加・完了したい場合は、`env` に `"SYMNOTE_MCP_DIRECT_WRITES": "1"` を加えた **別名の接続**（例: `symnote-write`）を登録し、メール等を読ませる作業ではその接続を有効にしないでください。
+インターネットに公開するリモート接続（ChatGPT / claude.ai）はこの設定の影響を受けません。公開接続で直接書き込みを許す場合だけ、別の `SYMNOTE_MCP_REMOTE_DIRECT_WRITES=1` を設定します（非推奨）。
 
 ```bash
 uv pip install --python .venv/bin/python "mcp>=1.20,<2"
@@ -111,6 +129,41 @@ Claude Desktop の `claude_desktop_config.json`（Claude Code では `.mcp.json`
 
 Streamlit アプリと MCP サーバーは同じ SQLite ファイルを同時に使えます（WAL モード）。
 
+### claude.ai から使う（リモート接続）
+
+claude.ai（Web / スマホアプリ）は Anthropic のクラウドから接続してくるため、Mac 上の SymNote を HTTPS で公開します。`symnote.mcp_remote` は 127.0.0.1 だけで待ち受け、Cloudflare Tunnel がそこへ中継します。接続時は OAuth の同意画面が開き、**パスフレーズを入力した場合だけ** claude.ai にトークンが発行されます。公開するツールはローカル接続と同じです（`add_task` / `complete_task` は既定で無効）。
+
+1. `.env` に設定を追加します（`.env.example` 参照）。
+
+   ```bash
+   SYMNOTE_MCP_PUBLIC_URL=https://symnote.example.com   # トンネルの公開 URL（パスなし）
+   SYMNOTE_MCP_PASSPHRASE=十分に長いパスフレーズ           # 12 文字以上
+   ```
+
+2. サーバーを起動します（常駐させるなら `docs/launchd/com.symnote.mcp-remote.plist.example` を使います）。
+
+   ```bash
+   DB_PATH=/absolute/path/to/symnote.db PYTHONPATH=src .venv/bin/python -m symnote.mcp_remote
+   ```
+
+3. Cloudflare Tunnel で `http://127.0.0.1:8765` を公開します（`brew install cloudflared`）。
+   - **独自ドメインを Cloudflare で管理している場合（推奨）**: URL が固定されます。
+     ```bash
+     cloudflared tunnel login
+     cloudflared tunnel create symnote
+     cloudflared tunnel route dns symnote symnote.example.com
+     cloudflared tunnel run --url http://127.0.0.1:8765 symnote
+     ```
+   - **ドメインがない場合（お試し）**: `cloudflared tunnel --url http://127.0.0.1:8765` で表示される `https://〜.trycloudflare.com` を `SYMNOTE_MCP_PUBLIC_URL` に設定してサーバーを再起動します。cloudflared を再起動するたびに URL が変わり、コネクタの登録し直しが必要です。
+
+4. claude.ai の「設定 → コネクタ → カスタムコネクタを追加」で、URL に `https://symnote.example.com/mcp` を入力します（OAuth の Client ID / Secret 欄は空のまま）。「連携」を押すと SymNote の同意画面が開くので、パスフレーズを入力して承認します。
+
+- 承認後の戻り先は claude.ai / claude.com とローカルホストだけに制限しています。ほかのサービスを使う場合は `SYMNOTE_MCP_REDIRECT_URIS`（カンマ区切り）で戻り先を追加します。
+- 同じ送信元からパスフレーズを 5 回間違えるとその送信元を 15 分間ロックし、全体で 50 回失敗すると全体を 15 分間ロックします。
+- アクセスが大量に来る場合は、Cloudflare 側のレート制限（WAF）も併用してください。
+- アクセストークンの有効期限は 1 時間、リフレッシュトークンは 30 日（使うたびに更新）です。使用済みのリフレッシュトークンが再び使われたら盗用とみなし、その接続を無効にします（claude.ai で再接続が必要になります）。トークンは DB にハッシュだけを保存します。
+- パスフレーズが漏れた・端末を手放したなどの場合は、パスフレーズを変えてから `python -m symnote.mcp_remote --revoke-all` で全接続を無効にします。
+
 ## 繰り返しタスク
 
 タスク登録時に「なし」「毎日」「毎週」「隔週」を選べます。繰り返しタスクを完了にすると（編集画面でステータスを done にした場合も含め）、完了履歴を残したまま次回分が自動作成されます。終了日を空欄にすると無期限に繰り返します。タスク編集画面から「繰り返しを停止」を選ぶと、以降の自動作成だけを止められます。
@@ -122,10 +175,12 @@ src/symnote/         # Streamlit UI ＋ core ロジック
   ├─ app.py          # タブ UI
   ├─ calendar_app.py # 月カレンダー
   ├─ mcp_server.py   # MCP サーバー（AI 連携）
+  ├─ mcp_remote.py   # claude.ai 向けリモート MCP（HTTP + OAuth）
   ├─ calendar_sync.py # Google Calendar 定期同期コマンド
   ├─ views/          # 画面単位の UI（候補の承認など）
   ├─ core/db.py      # SQLite アクセス
   ├─ core/candidates.py # AI が提案した ToDo 候補の承認フロー
+  ├─ core/oauth_store.py # リモート MCP の OAuth クライアント・トークン保存
   ├─ core/nlp.py     # AI-1 & AI-2 & AI-3
   └─ core/weekly_review.py # (Deprecated)
 tests/               # pytest
