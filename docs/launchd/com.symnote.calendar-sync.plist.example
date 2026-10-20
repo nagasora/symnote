@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- SymNote の Google Calendar 朝のまとめを 30 分ごとに同期する LaunchAgent の例。
+     /absolute/path/to/... を自分の環境の絶対パスに置き換えてから使う。 -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.symnote.calendar-sync</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/absolute/path/to/symnote/.venv/bin/python</string>
+    <string>-m</string>
+    <string>symnote.calendar_sync</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONPATH</key>
+    <string>/absolute/path/to/symnote/src</string>
+    <key>DB_PATH</key>
+    <string>/absolute/path/to/symnote.db</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/symnote-calendar-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/symnote-calendar-sync.log</string>
+</dict>
+</plist>

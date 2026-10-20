@@ -1,0 +1,133 @@
+/*
+ * SymNote デザイントークン（方向性②「やわらかい紙のノート」）
+ *
+ * 実装時は web/src/styles/tokens.css にこのまま移し、
+ * Tailwind の theme 拡張からは CSS 変数として参照する。
+ * 文字色のコントラストは WCAG AA（本文 4.5:1）を満たすよう調整済み。--ink-4 は読ませない要素専用。
+ * 色を直接書かず、必ずこの変数を通すこと（ダークモードの切り替えをここに集約するため）。
+ */
+
+:root,
+[data-theme="light"] {
+  /* 紙と墨 */
+  --bg: #f5f1e8;            /* 生成りの紙 */
+  --surface: #fffdf7;       /* カード・パネル */
+  --surface-2: #f0eadd;     /* 入力欄・ホバー */
+  --surface-sunk: #e9e2d3;  /* 押し込み・選択中の背景 */
+  --ink: #2a2620;           /* 本文 */
+  --ink-2: #5f574b;         /* 補足 */
+  --ink-3: #72685b;         /* メタ情報（AA 4.5:1 を満たす最も淡い文字色） */
+  --ink-4: #a39a8b;         /* プレースホルダー・無効・装飾。読ませる文字には使わない */
+  --line: #e2d9c8;
+  --line-strong: #cfc4af;
+
+  /* 差し色（藍・朱・抹茶・黄土） */
+  --accent: #3b5b92;        /* 藍: 主要操作・選択 */
+  --accent-hover: #314d7d;
+  --accent-soft: #e3e8f2;
+  --on-accent: #ffffff;
+  --danger: #a8432b;        /* 朱: 期限切れ・削除 */
+  --danger-soft: #f6e2da;
+  --success: #55713f;       /* 抹茶: 完了 */
+  --success-soft: #e4ebdb;
+  --ai: #87601a;            /* 黄土: AI 由来のもの */
+  --ai-soft: #f4e9d2;
+
+  /* 情報源のしるし */
+  --src-gmail: #c4553a;
+  --src-slack: #6b4a7a;
+  --src-notion: #2a2620;
+  --src-chat: #3b5b92;
+  --src-calendar: #5c7a4a;
+
+  --shadow-card: 0 1px 0 rgba(42, 38, 32, 0.04), 0 8px 24px -14px rgba(42, 38, 32, 0.25);
+  --shadow-pop: 0 30px 70px -24px rgba(42, 38, 32, 0.45), 0 2px 6px rgba(42, 38, 32, 0.06);
+  --backdrop: rgba(42, 38, 32, 0.28);
+  --paper-grain-opacity: 0.35;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  /* 夜のノート: 黒ではなく、焦げ茶寄りの墨色 */
+  --bg: #1c1a17;
+  --surface: #24211d;
+  --surface-2: #2c2924;
+  --surface-sunk: #34302a;
+  --ink: #eee7da;
+  --ink-2: #bdb3a3;
+  --ink-3: #9d9385;
+  --ink-4: #6f675c;
+  --line: #39352f;
+  --line-strong: #4a453d;
+
+  --accent: #93acdb;
+  --accent-hover: #a9bde3;
+  --accent-soft: #2a3242;
+  --on-accent: #16181d;
+  --danger: #e07a60;
+  --danger-soft: #3a2621;
+  --success: #94b27f;
+  --success-soft: #26301f;
+  --ai: #d6ad5f;
+  --ai-soft: #352c1c;
+
+  --src-gmail: #e07a60;
+  --src-slack: #b993c9;
+  --src-notion: #eee7da;
+  --src-chat: #93acdb;
+  --src-calendar: #94b27f;
+
+  --shadow-card: 0 1px 0 rgba(0, 0, 0, 0.25), 0 10px 26px -16px rgba(0, 0, 0, 0.7);
+  --shadow-pop: 0 30px 70px -20px rgba(0, 0, 0, 0.8);
+  --backdrop: rgba(0, 0, 0, 0.5);
+  --paper-grain-opacity: 0.12;
+  color-scheme: dark;
+}
+
+:root {
+  /* 文字: 見出しは明朝、本文はゴシック。数字は等幅にそろえる */
+  --font-serif: "Shippori Mincho B1", "Hiragino Mincho ProN", "Yu Mincho", serif;
+  --font-sans: "Zen Kaku Gothic New", "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
+
+  --text-xs: 0.75rem;   /* 12px: 補足ラベル */
+  --text-sm: 0.8125rem; /* 13px: メタ情報 */
+  --text-md: 0.9375rem; /* 15px: 本文・タスク名 */
+  --text-lg: 1.125rem;  /* 18px: セクション見出し */
+  --text-xl: 1.5rem;    /* 24px: 詳細パネルのタイトル */
+  --text-2xl: 2.25rem;  /* 36px: 画面見出し（日付など） */
+
+  /* 4px 基準の余白 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 18px;
+  --r-pill: 999px;
+
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-1: 120ms; /* ホバー・押下 */
+  --dur-2: 200ms; /* チェック・切り替え */
+  --dur-3: 320ms; /* パネル・シートの出入り */
+
+  --sidebar-w: 248px;
+  --detail-w: 420px;
+  --content-max: 760px;
+  --tabbar-h: 64px;
+  --touch-min: 44px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-1: 0ms;
+    --dur-2: 0ms;
+    --dur-3: 0ms;
+  }
+}

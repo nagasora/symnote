@@ -1,0 +1,25 @@
+FROM node:22-bookworm-slim AS frontend
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+FROM python:3.12-slim
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app/src \
+    DB_PATH=/var/data/owner/symnote.db \
+    SYMNOTE_DATA_DIR=/var/data \
+    SYMNOTE_E2E=0 \
+    SYMNOTE_ALLOW_NO_PASSCODE=0
+COPY requirements.txt requirements-web.txt ./
+RUN python -m pip install --no-cache-dir -r requirements-web.txt
+COPY src/ ./src/
+COPY --from=frontend /web/dist ./web/dist
+RUN mkdir -p /var/data/owner
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
+  CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:'+os.getenv('PORT','8000')+'/api/health',timeout=3)" || exit 1
+CMD ["sh", "-c", "exec python -m symnote.web_server --host 0.0.0.0 --port ${PORT:-8000}"]

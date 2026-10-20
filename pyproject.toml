@@ -14,12 +14,25 @@ dynamic = ["dependencies"]
 dev = [
     "pytest>=8.0,<9",
     "ruff>=0.6,<1",
+    "mcp>=1.20,<2",
+    "segno>=1.6,<2",
 ]
+mcp = [
+    "mcp>=1.20,<2",
+]
+
+[project.scripts]
+symnote-mcp = "symnote.mcp_server:main"
+symnote-mcp-remote = "symnote.mcp_remote:main"
+symnote-calendar-sync = "symnote.calendar_sync:main"
+symnote-web = "symnote.web_server:main"
+symnote-admin = "symnote.admin_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.dynamic]
+# SDK の二重定義による版ずれを避けるため、google-genai もこの一覧から取得する。
 dependencies = {file = ["requirements.txt"]}
 
 [tool.pytest.ini_options]

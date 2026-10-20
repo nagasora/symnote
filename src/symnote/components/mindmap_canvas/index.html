@@ -2,105 +2,529 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>マインドマップ</title>
   <style>
+    :root {
+      color-scheme: dark;
+      --surface: #1a1a19; --panel: #242423; --ink: #f0efec; --secondary: #c3c2b7;
+      --line: #454540; --blue: #3987e5; --orange: #d95926; --aqua: #199e70;
+      --selection: #f0efec; --wash: rgba(255,255,255,.06);
+    }
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --surface: #fcfcfb; --panel: #ffffff; --ink: #0b0b0b; --secondary: #52514e;
+      --line: #d4d4cd; --blue: #2a78d6; --orange: #eb6834; --aqua: #1baf7a;
+      --selection: #0b0b0b; --wash: rgba(11,11,11,.05);
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; font-family: sans-serif; background: #20252b; color: #f3f5f7; }
-    #shell { border: 1px solid #353d47; border-radius: 18px; overflow: hidden; }
-    #toolbar { display: flex; justify-content: space-between; gap: 16px; padding: 12px 16px; border-bottom: 1px solid #353d47; font-size: 12px; color: #c6d0dd; }
-    #legend { color: #95a3b6; }
-    #canvas { position: relative; overflow: auto; min-height: 440px; background: radial-gradient(circle at 47% 45%, #29313a, #20252b 48%, #1b2025); }
-    #stage { position: relative; min-width: 920px; }
-    svg { position: absolute; inset: 0; pointer-events: none; }
-    .edge { fill: none; stroke: #8a93e8; stroke-width: 1.5; opacity: .82; }
-    .edge.active { stroke: #64d6b8; stroke-width: 2.3; opacity: 1; }
-    .node { position: absolute; width: 175px; padding: 9px 11px; overflow-wrap: anywhere; border: 1px solid rgba(255,255,255,.05); border-radius: 6px; box-shadow: 0 2px 7px rgba(0,0,0,.2); color: #f3f5f7; font-size: 12px; font-weight: 600; line-height: 1.25; text-align: left; cursor: pointer; }
-    .node:hover { filter: brightness(1.18); box-shadow: 0 0 0 2px rgba(212,222,255,.55); }
-    .root { background: #4c536f; } .idea { background: #414a55; } .task { background: #31544c; }
-    .note { background: #5a4c36; } .detail, .link { background: #374250; }
-    .selected { box-shadow: 0 0 0 3px #f6c85f, 0 5px 15px rgba(0,0,0,.35); }
-    .focus { box-shadow: 0 0 0 2px #64d6b8, 0 3px 10px rgba(0,0,0,.28); }
+    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--surface); color: var(--ink); }
+    button { font: inherit; color: inherit; }
+    #shell { border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+    #toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+    #heading { font-size: 13px; font-weight: 650; }
+    #legend { display: flex; flex-wrap: wrap; gap: 12px; color: var(--secondary); font-size: 11px; }
+    .legend-item { display: inline-flex; align-items: center; gap: 5px; }
+    .swatch { width: 10px; height: 10px; border-radius: 3px; background: var(--accent); }
+    .idea, .root { --accent: var(--blue); }
+    .task { --accent: var(--aqua); }
+    .note { --accent: var(--orange); }
+    .detail, .link { --accent: var(--secondary); }
+    #controls { display: flex; align-items: center; gap: 4px; }
+    .control { min-width: 32px; min-height: 32px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 7px; background: transparent; cursor: pointer; font-size: 12px; }
+    .control:hover, .control:focus-visible { background: var(--wash); }
+    #zoom-label { min-width: 46px; text-align: center; font-size: 11px; color: var(--secondary); font-variant-numeric: tabular-nums; }
+    #canvas { position: relative; height: 480px; overflow: hidden; touch-action: none; cursor: grab; outline-offset: -3px; background: var(--surface); }
+    #canvas.dragging { cursor: grabbing; }
+    #stage { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+    #edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+    .edge { fill: none; stroke: var(--line); stroke-width: 2; vector-effect: non-scaling-stroke; }
+    .edge.active { stroke: var(--blue); }
+    .node-wrap { position: absolute; }
+    .node { display: flex; flex-direction: column; gap: 6px; width: 100%; min-height: 66px; padding: 12px 15px; border: 1px solid var(--line); border-inline-start: 4px solid var(--accent); border-radius: 10px; background: var(--panel); text-align: left; cursor: pointer; }
+    .node.root { border-radius: 16px; border-top: 3px solid var(--accent); }
+    .kind { font-size: 10px; font-weight: 500; color: var(--secondary); }
+    .title { font-size: 13px; font-weight: 600; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+    .node:hover { background: var(--surface); outline: 1px solid var(--secondary); }
+    .node.focus { border-color: var(--blue); }
+    .node.selected { outline: 3px solid var(--selection); outline-offset: 3px; }
+    .node:focus-visible, .collapse:focus-visible, .add-child:focus-visible, .control:focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
+    .node-actions { display: flex; width: max-content; margin-left: auto; gap: 6px; padding-top: 6px; }
+    .node-wrap.left .node-actions { margin-left: 0; }
+    .collapse, .add-child { min-width: 44px; min-height: 44px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--ink); cursor: pointer; font-size: 18px; }
+    .add-child { font-size: 13px; }
+    .collapse:hover, .add-child:hover { outline: 2px solid var(--secondary); }
+    #empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--secondary); font-size: 13px; pointer-events: none; }
+    #empty[hidden] { display: none; }
+    #footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 9px 16px; border-top: 1px solid var(--line); color: var(--secondary); font-size: 11px; }
+    #list-view { max-height: 260px; overflow: auto; padding: 8px 16px; border-top: 1px solid var(--line); }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; }
+    caption { text-align: left; padding: 6px 0 10px; color: var(--secondary); }
+    td, th { padding: 8px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+    td:last-child { white-space: pre-wrap; }
+    @media (max-width: 600px) {
+      #toolbar { padding: 10px; } #legend { gap: 8px; } #heading { width: 100%; }
+      .node-actions { transform: scale(var(--touch-control-scale, 1)); transform-origin: top right; }
+      .node-wrap.left .node-actions { transform-origin: top left; }
+    }
+    @media (forced-colors: active) { .node { border: 2px solid CanvasText; } .node.selected { outline: 4px double Highlight; } .edge { stroke: CanvasText; } .swatch { border: 1px solid CanvasText; } }
   </style>
 </head>
 <body>
-  <div id="shell"><div id="toolbar"><span>マインドマップ</span><span id="legend"></span></div><div id="canvas"><div id="stage"><svg id="edges"></svg></div></div></div>
+  <div id="shell">
+    <div id="toolbar">
+      <span id="heading">マインドマップ</span>
+      <div id="legend" aria-label="ノードの種別">
+        <span class="legend-item idea"><span class="swatch" aria-hidden="true"></span>ルート・アイデア</span>
+        <span class="legend-item task"><span class="swatch" aria-hidden="true"></span>タスク</span>
+        <span class="legend-item note"><span class="swatch" aria-hidden="true"></span>メモ</span>
+        <span class="legend-item detail"><span class="swatch" aria-hidden="true"></span>詳細・リンク</span>
+      </div>
+      <div id="controls" aria-label="表示操作">
+        <button id="zoom-out" class="control" aria-label="縮小">−</button>
+        <output id="zoom-label" aria-label="縮尺">100%</output>
+        <button id="zoom-in" class="control" aria-label="拡大">＋</button>
+        <button id="fit" class="control">全体表示</button>
+        <button id="list-toggle" class="control" aria-expanded="false" aria-controls="list-view">一覧</button>
+      </div>
+    </div>
+    <div id="canvas" tabindex="0" role="region" aria-label="マインドマップ。背景をドラッグして移動、ホイールで拡大縮小。矢印キーで移動、0で全体表示。">
+      <div id="stage"><svg id="edges" aria-hidden="true"></svg></div>
+      <div id="empty">マインドマップのノードがありません</div>
+    </div>
+    <div id="footer"><span>＋追加: AI/手入力で枝を追加 · −/＋: 折りたたみ/再展開 · ノード選択: 編集/タスク化 · 背景ドラッグ: 移動</span><span id="status" role="status" aria-live="polite"></span></div>
+    <div id="list-view" hidden><table><caption>受信済みノードの一覧（折りたたみ内は未取得の場合があります）</caption><thead><tr><th scope="col">種別</th><th scope="col">タイトル</th><th scope="col">本文</th></tr></thead><tbody id="list-body"></tbody></table></div>
+  </div>
   <script>
+    'use strict';
+    /**
+     * Streamlitの既存イベント契約を保つ、外部依存のない左右型マインドマップ。
+     * 座標はノード実測値から算出し、再描画時はユーザーの表示状態を維持する。
+     * @typedef {number|string} NodeId
+     * @typedef {{id: NodeId, kind: string, title: string, body?: string, children: NodeId[], has_children?: boolean, collapsed?: boolean}} MindmapNode
+     * @typedef {{nodes?: MindmapNode[], selected_id?: NodeId|null, focus_ids?: NodeId[], scale?: number, width?: number, height?: number}} RenderArgs
+     * @typedef {{node: MindmapNode, children: Branch[], width: number, height: number, span: number, x: number, y: number, side: number}} Branch
+     */
     const stage = document.getElementById('stage');
     const edges = document.getElementById('edges');
     const canvas = document.getElementById('canvas');
-    const legend = document.getElementById('legend');
-    let latestArgs = {};
-    const componentInstanceId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+    const status = document.getElementById('status');
+    const zoomLabel = document.getElementById('zoom-label');
+    const kindLabels = { root: 'ルート', idea: 'アイデア', task: 'タスク', note: 'メモ', detail: '詳細', link: 'リンク' };
+    const componentInstanceId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     let eventCounter = 0;
+    /** @type {ReturnType<typeof setTimeout>|null} */
+    let selectionTimer = null;
+    /** @type {RenderArgs} */
+    let latestArgs = {};
+    /** @type {Map<NodeId, MindmapNode>} */
+    let nodeById = new Map();
+    /** @type {Map<NodeId, HTMLElement>} */
+    let elementById = new Map();
+    /** @type {Map<NodeId, boolean>} */
+    const pendingCollapse = new Map();
+    /** @type {Map<NodeId, number>} */
+    const branchSides = new Map();
+    /** @type {NodeId|null} */
+    let selectedId = null;
+    /** @type {NodeId|null|undefined} */
+    let previousServerSelection;
+    let mapKey = null;
+    let initialized = false;
+    /** @type {{scale: number, x: number, y: number}} */
+    const viewport = { scale: 1, x: 0, y: 0 };
+    /** @type {{minX: number, maxX: number, minY: number, maxY: number}} */
+    let bounds = { minX: -110, maxX: 110, minY: -40, maxY: 40 };
+    /** @type {{pointerId: number, x: number, y: number, startX: number, startY: number}|null} */
+    let drag = null;
 
+    /** Python側が処理する選択・開閉・子追加イベントを送る。 @param {string} type @param {NodeId} nodeId @returns {void} */
     function send(type, nodeId) {
       eventCounter += 1;
       window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setComponentValue', value: { type, node_id: nodeId, event_id: `${componentInstanceId}:${eventCounter}` } }, '*');
     }
-    function frameHeight(height) {
-      window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setFrameHeight', height }, '*');
+
+    /** iframeの高さを通知する。 @returns {void} */
+    function frameHeight() {
+      window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:setFrameHeight', height: Math.ceil(document.getElementById('shell').getBoundingClientRect().height) + 2 }, '*');
     }
-    function render(data) {
-      latestArgs = data || {};
-      const nodes = latestArgs.nodes || [];
-      const scale = latestArgs.scale || 1;
-      const width = latestArgs.width || 920;
-      const height = latestArgs.height || 440;
-      const focus = new Set(latestArgs.focus_ids || []);
-      const nodeById = new Map(nodes.map(n => [n.id, n]));
-      stage.replaceChildren(edges);
-      edges.replaceChildren();
-      stage.style.width = width + 'px'; stage.style.height = height + 'px';
-      edges.setAttribute('width', width); edges.setAttribute('height', height);
-      legend.textContent = `クリック: 選択 · ダブルクリック/右クリック/Ctrl+Enter: 展開・折りたたみ · 縮尺 ${Math.round(scale * 100)}%`;
-      for (const node of nodes) {
-        for (const childId of node.children) {
-          const child = nodeById.get(childId); if (!child) continue;
-          const startX = node.x + 172 * scale, endX = child.x, mid = (startX + endX) / 2;
-          const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-          path.setAttribute('class', `edge ${focus.has(childId) ? 'active' : ''}`);
-          path.setAttribute('d', `M ${startX} ${node.y} C ${mid} ${node.y}, ${mid} ${child.y}, ${endX} ${child.y}`);
-          edges.appendChild(path);
+
+    /** 有限な縮尺を許容範囲に収める。 @param {number} scale @returns {number} */
+    function clampScale(scale) {
+      // スマホで全体表示を優先しすぎると、隣接する追加ボタンが重なりタップできない。
+      const minimumScale = canvas.clientWidth <= 600 ? 0.6 : 0.12;
+      return Math.min(2.5, Math.max(minimumScale, Number.isFinite(scale) ? scale : 1));
+    }
+
+    /** 変換だけを更新しノードのフォーカスを維持する。 @returns {void} */
+    function applyViewport() {
+      stage.style.setProperty('--touch-control-scale', String(Math.max(1, 1 / viewport.scale)));
+      stage.style.transform = `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`;
+      zoomLabel.textContent = `${Math.round(viewport.scale * 100)}%`;
+    }
+
+    /** 指定した画面位置を固定して拡大縮小する。 @param {number} scale @param {number} x @param {number} y @returns {void} */
+    function zoomAt(scale, x, y) {
+      const nextScale = clampScale(scale);
+      const ratio = nextScale / viewport.scale;
+      viewport.x = x - (x - viewport.x) * ratio;
+      viewport.y = y - (y - viewport.y) * ratio;
+      viewport.scale = nextScale;
+      applyViewport();
+    }
+
+    /** ルートを水平方向の中心に置き全体を収める。 @returns {void} */
+    function fitMap() {
+      const horizontalSpan = Math.max(Math.abs(bounds.minX), Math.abs(bounds.maxX)) * 2;
+      viewport.scale = clampScale(Math.min(1, (canvas.clientWidth - 64) / horizontalSpan, (canvas.clientHeight - 64) / Math.max(1, bounds.maxY - bounds.minY)));
+      viewport.x = canvas.clientWidth / 2;
+      viewport.y = canvas.clientHeight / 2 - (bounds.minY + bounds.maxY) / 2 * viewport.scale;
+      applyViewport();
+    }
+
+    /** サーバー確認前はユーザーの開閉操作を優先する。 @param {MindmapNode} node @returns {boolean} */
+    function isCollapsed(node) {
+      return pendingCollapse.has(node.id) ? pendingCollapse.get(node.id) : Boolean(node.collapsed);
+    }
+
+    /** 子が省略された折りたたみノードも開閉可能にする。 @param {MindmapNode} node @returns {boolean} */
+    function hasChildren(node) {
+      return Boolean(node.has_children || node.children.length);
+    }
+
+    /** ダブルクリックと区別して選択を反映し、既存APIへ通知する。 @param {NodeId} id @returns {void} */
+    function selectNode(id) {
+      clearTimeout(selectionTimer);
+      // 即時送信するとStreamlitの再描画がダブルクリックの後半を消してしまう。
+      selectionTimer = setTimeout(() => {
+        selectionTimer = null;
+        selectedId = id;
+        updateSelection();
+        send('select', id);
+      }, 240);
+    }
+
+    /** 開閉を即時反映し、欠けている子の取得はPython側に委ねる。 @param {MindmapNode} node @returns {void} */
+    function toggleNode(node) {
+      clearTimeout(selectionTimer);
+      selectionTimer = null;
+      if (!hasChildren(node)) return;
+      pendingCollapse.set(node.id, !isCollapsed(node));
+      draw();
+      const toggle = elementById.get(node.id)?.querySelector('.collapse');
+      toggle?.focus({ preventScroll: true });
+      send('toggle', node.id);
+    }
+
+    /** 選択と経路強調を別の視覚属性で表す。 @returns {void} */
+    function updateSelection() {
+      for (const [id, wrapper] of elementById) {
+        const button = wrapper.querySelector('.node');
+        button.classList.toggle('selected', id === selectedId);
+        button.setAttribute('aria-pressed', String(id === selectedId));
+      }
+    }
+
+    /** DOMだけで安全にノードを生成し、実測できる状態で配置する。 @param {MindmapNode} node @returns {HTMLElement} */
+    function createNode(node) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'node-wrap';
+      wrapper.style.width = `${node.kind === 'root' ? 220 : 196}px`;
+      const button = document.createElement('button');
+      const kind = Object.hasOwn(kindLabels, node.kind) ? node.kind : 'detail';
+      button.className = `node ${kind}`;
+      button.classList.toggle('focus', (latestArgs.focus_ids || []).includes(node.id));
+      button.title = node.body || node.title;
+      if (node.body) button.setAttribute('aria-description', node.body);
+      const label = document.createElement('span');
+      label.className = 'kind';
+      label.textContent = kindLabels[kind];
+      const title = document.createElement('span');
+      title.className = 'title';
+      title.textContent = node.title;
+      button.append(label, title);
+      button.onclick = () => selectNode(node.id);
+      button.ondblclick = event => { event.preventDefault(); toggleNode(node); };
+      button.oncontextmenu = event => { event.preventDefault(); toggleNode(node); };
+      button.onkeydown = event => {
+        if (event.ctrlKey && event.key === 'Enter') {
+          event.preventDefault();
+          toggleNode(node);
+        }
+      };
+      wrapper.appendChild(button);
+      const actions = document.createElement('div');
+      actions.className = 'node-actions';
+      const add = document.createElement('button');
+      add.className = 'add-child';
+      add.textContent = '＋ 追加';
+      add.setAttribute('aria-label', `${node.title}に子ノードを追加`);
+      add.title = 'AIに考えてもらう、または自分で入力する';
+      add.onclick = () => {
+        clearTimeout(selectionTimer);
+        selectionTimer = null;
+        selectedId = node.id;
+        updateSelection();
+        send('add_child', node.id);
+      };
+      if (hasChildren(node)) {
+        const collapsed = isCollapsed(node);
+        button.setAttribute('aria-expanded', String(!collapsed));
+        const toggle = document.createElement('button');
+        toggle.className = 'collapse';
+        toggle.textContent = collapsed ? '+' : '−';
+        toggle.setAttribute('aria-label', `${node.title}の子を${collapsed ? '展開' : '折りたたみ'}`);
+        toggle.setAttribute('aria-expanded', String(!collapsed));
+        toggle.title = '展開・折りたたみ（ダブルクリック・右クリック・Ctrl+Enterも使用可能）';
+        toggle.onclick = () => toggleNode(node);
+        actions.appendChild(toggle);
+      }
+      actions.appendChild(add);
+      wrapper.appendChild(actions);
+      stage.appendChild(wrapper);
+      elementById.set(node.id, wrapper);
+      return wrapper;
+    }
+
+    /** 循環や重複参照を除き、表示前に全ノードの所属を確定する。 @returns {Branch[]} */
+    function buildForest() {
+      const visited = new Set();
+      const referenced = new Set([...nodeById.values()].flatMap(node => node.children));
+      /** 枝を一度だけ組み立てる。 @param {MindmapNode} node @returns {Branch|null} */
+      function visit(node) {
+        if (visited.has(node.id)) return null;
+        visited.add(node.id);
+        const children = node.children.map(id => nodeById.get(id)).filter(Boolean).map(visit).filter(Boolean);
+        return { node, children, width: 0, height: 0, span: 0, x: 0, y: 0, side: 0 };
+      }
+      const roots = [...nodeById.values()].filter(node => node.kind === 'root' || !referenced.has(node.id));
+      const forest = roots.map(visit).filter(Boolean);
+      for (const node of nodeById.values()) {
+        const branch = visit(node);
+        if (branch) forest.push(branch);
+      }
+      return forest;
+    }
+
+    /** 可視部分だけを実測し、長いタイトルでも枝同士を重ねない。 @param {Branch} branch @returns {void} */
+    function measureBranch(branch) {
+      const wrapper = createNode(branch.node);
+      branch.width = wrapper.offsetWidth;
+      branch.height = wrapper.offsetHeight;
+      if (isCollapsed(branch.node)) branch.children = [];
+      branch.children.forEach(measureBranch);
+      branch.span = Math.max(branch.height, branch.children.reduce((sum, child) => sum + child.span, 0) + Math.max(0, branch.children.length - 1) * 24);
+    }
+
+    /** 一度割り当てた側を再描画でも維持し、新規枝だけを左右へ振り分ける。 @param {Branch[]} children @returns {void} */
+    function assignSides(children) {
+      let left = children.filter(child => branchSides.get(child.node.id) === -1).length;
+      let right = children.filter(child => branchSides.get(child.node.id) === 1).length;
+      for (const child of children) {
+        if (!branchSides.has(child.node.id)) {
+          const side = right <= left ? 1 : -1;
+          branchSides.set(child.node.id, side);
+          if (side === 1) right += 1; else left += 1;
+        }
+        child.side = branchSides.get(child.node.id);
+      }
+    }
+
+    /** 子群を親の左右のいずれかへ配置する。 @param {Branch} parent @param {Branch[]} children @param {number} side @returns {void} */
+    function placeChildren(parent, children, side) {
+      const total = children.reduce((sum, child) => sum + child.span, 0) + Math.max(0, children.length - 1) * 24;
+      let top = parent.y - total / 2;
+      for (const child of children) {
+        child.side = side;
+        child.x = side > 0 ? parent.x + parent.width + 76 : parent.x - 76 - child.width;
+        child.y = top + child.span / 2;
+        top += child.span + 24;
+        placeChildren(child, child.children, side);
+      }
+    }
+
+    /** ノード位置と左右に対応したベジェ曲線を描画する。 @param {Branch} branch @returns {void} */
+    function paintBranch(branch) {
+      const wrapper = elementById.get(branch.node.id);
+      wrapper.style.left = `${branch.x}px`;
+      wrapper.style.top = `${branch.y - branch.height / 2}px`;
+      wrapper.classList.toggle('left', branch.side < 0);
+      bounds.minX = Math.min(bounds.minX, branch.x - 16);
+      bounds.maxX = Math.max(bounds.maxX, branch.x + branch.width + 16);
+      bounds.minY = Math.min(bounds.minY, branch.y - branch.height / 2 - 8);
+      bounds.maxY = Math.max(bounds.maxY, branch.y + branch.height / 2 + 8);
+      for (const child of branch.children) {
+        const startX = child.side > 0 ? branch.x + branch.width : branch.x;
+        const endX = child.side > 0 ? child.x : child.x + child.width;
+        const mid = (startX + endX) / 2;
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('class', (latestArgs.focus_ids || []).includes(child.node.id) ? 'edge active' : 'edge');
+        path.setAttribute('d', `M ${startX} ${branch.y} C ${mid} ${branch.y}, ${mid} ${child.y}, ${endX} ${child.y}`);
+        edges.appendChild(path);
+        paintBranch(child);
+      }
+    }
+
+    /** 全ノードの内容を色やホバーに依存しない一覧にも提供する。 @returns {void} */
+    function renderList() {
+      const tbody = document.getElementById('list-body');
+      tbody.replaceChildren();
+      for (const node of nodeById.values()) {
+        const row = document.createElement('tr');
+        for (const value of [kindLabels[node.kind] || '詳細', node.title, node.body || '']) {
+          const cell = document.createElement('td');
+          cell.textContent = value;
+          row.appendChild(cell);
+        }
+        tbody.appendChild(row);
+      }
+    }
+
+    /** レイアウトを更新するがズーム・パンは初回以外変更しない。 @returns {void} */
+    function draw() {
+      const active = document.activeElement;
+      let focusedId = null;
+      let focusedControl = '.node';
+      for (const [id, wrapper] of elementById) {
+        if (wrapper.contains(active)) {
+          focusedId = id;
+          focusedControl = active.classList.contains('collapse') ? '.collapse' : active.classList.contains('add-child') ? '.add-child' : '.node';
+          break;
         }
       }
-      for (const node of nodes) {
-        const button = document.createElement('button');
-        button.className = `node ${node.kind} ${node.id === latestArgs.selected_id ? 'selected' : ''} ${focus.has(node.id) ? 'focus' : ''}`;
-        button.style.left = node.x + 'px'; button.style.top = node.y + 'px';
-        button.style.transform = `translateY(-50%) scale(${scale})`; button.style.transformOrigin = 'left center';
-        button.title = node.body || node.title;
-        button.textContent = `${node.has_children ? (node.collapsed ? '▸ ' : '▾ ') : ''}${node.title}`;
-        button.setAttribute('aria-label', node.has_children ? `${node.title}。Ctrl+Enterで展開または折りたたみ` : node.title);
-        if (node.has_children) button.setAttribute('aria-expanded', String(!node.collapsed));
-        let clickTimer = null;
-        button.onclick = () => {
-          clearTimeout(clickTimer);
-          clickTimer = setTimeout(() => send('select', node.id), 240);
-        };
-        button.ondblclick = event => {
-          event.preventDefault();
-          clearTimeout(clickTimer);
-          if (node.has_children) send('toggle', node.id);
-        };
-        button.oncontextmenu = event => {
-          event.preventDefault();
-          clearTimeout(clickTimer);
-          if (node.has_children) send('toggle', node.id);
-        };
-        button.onkeydown = event => {
-          if (event.ctrlKey && event.key === 'Enter' && node.has_children) {
-            event.preventDefault();
-            clearTimeout(clickTimer);
-            send('toggle', node.id);
-          }
-        };
-        stage.appendChild(button);
+      stage.replaceChildren(edges);
+      edges.replaceChildren();
+      elementById = new Map();
+      const forest = buildForest();
+      bounds = { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+      let nextY = 0;
+      for (const root of forest) {
+        measureBranch(root);
+        root.x = -root.width / 2;
+        root.y = nextY;
+        assignSides(root.children);
+        placeChildren(root, root.children.filter(child => child.side < 0), -1);
+        placeChildren(root, root.children.filter(child => child.side > 0), 1);
+        paintBranch(root);
+        nextY = bounds.maxY + root.span / 2 + 80;
       }
-      canvas.style.minHeight = Math.max(440, height) + 'px';
-      frameHeight(Math.max(470, height + 52));
+      document.getElementById('empty').hidden = nodeById.size > 0;
+      status.textContent = `${elementById.size} / ${nodeById.size} ノード表示`;
+      updateSelection();
+      if (!initialized && forest.length) {
+        fitMap();
+        // 旧レイアウト用の固定縮尺で上書きすると、大きなマップの初期表示が欠ける。
+        initialized = true;
+      } else applyViewport();
+      if (focusedId !== null) {
+        const wrapper = elementById.get(focusedId);
+        (wrapper?.querySelector(focusedControl) || canvas).focus({ preventScroll: true });
+      }
+      renderList();
+      frameHeight();
     }
-    window.addEventListener('message', event => {
-      if (event.data && event.data.type === 'streamlit:render') render(event.data.args);
+
+    /** サーバー状態を調停し、同じマップの再描画で表示状態を失わない。 @param {RenderArgs} data @returns {void} */
+    function render(data) {
+      latestArgs = data || {};
+      const nodes = Array.isArray(latestArgs.nodes) ? latestArgs.nodes : [];
+      nodeById = new Map();
+      for (const node of nodes) {
+        if (!node || node.id == null) continue;
+        nodeById.set(node.id, { ...node, title: String(node.title || ''), children: Array.isArray(node.children) ? node.children : [] });
+      }
+      const referenced = new Set([...nodeById.values()].flatMap(node => node.children));
+      const roots = [...nodeById.values()].filter(node => node.kind === 'root' || !referenced.has(node.id));
+      const nextKey = JSON.stringify((roots.length ? roots : [...nodeById.values()].slice(0, 1)).map(node => node.id));
+      if (nodeById.size && nextKey !== mapKey) {
+        clearTimeout(selectionTimer);
+        selectionTimer = null;
+        mapKey = nextKey;
+        pendingCollapse.clear();
+        branchSides.clear();
+        initialized = false;
+        previousServerSelection = undefined;
+        selectedId = null;
+      }
+      for (const [id, collapsed] of pendingCollapse) {
+        if (nodeById.has(id) && Boolean(nodeById.get(id).collapsed) === collapsed) pendingCollapse.delete(id);
+      }
+      if (latestArgs.selected_id !== previousServerSelection) selectedId = latestArgs.selected_id ?? null;
+      previousServerSelection = latestArgs.selected_id;
+      if (selectedId !== null && !nodeById.has(selectedId) && nodes.length) selectedId = latestArgs.selected_id ?? null;
+      canvas.style.height = `${Math.max(440, Math.min(680, Number(latestArgs.height) || 480))}px`;
+      draw();
+    }
+
+    /** ポインター捕捉を解除してパン操作を終了する。 @returns {void} */
+    function endPan() {
+      const pointerId = drag?.pointerId;
+      drag = null;
+      canvas.classList.remove('dragging');
+      if (pointerId !== undefined && canvas.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId);
+    }
+
+    canvas.addEventListener('wheel', event => {
+      event.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? canvas.clientHeight : 1);
+      zoomAt(viewport.scale * Math.exp(-Math.max(-120, Math.min(120, delta)) * 0.002), event.clientX - rect.left, event.clientY - rect.top);
+    }, { passive: false });
+    canvas.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || event.target.closest('button')) return;
+      canvas.focus({ preventScroll: true });
+      event.preventDefault();
+      drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, startX: viewport.x, startY: viewport.y };
+      canvas.setPointerCapture(event.pointerId);
+      canvas.classList.add('dragging');
     });
+    canvas.addEventListener('pointermove', event => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      viewport.x = drag.startX + event.clientX - drag.x;
+      viewport.y = drag.startY + event.clientY - drag.y;
+      applyViewport();
+    });
+    canvas.addEventListener('pointerup', endPan);
+    canvas.addEventListener('pointercancel', endPan);
+    canvas.addEventListener('lostpointercapture', endPan);
+    canvas.addEventListener('keydown', event => {
+      if (event.target !== canvas) return;
+      const shifts = { ArrowLeft: [48, 0], ArrowRight: [-48, 0], ArrowUp: [0, 48], ArrowDown: [0, -48] };
+      if (Object.hasOwn(shifts, event.key)) {
+        event.preventDefault();
+        viewport.x += shifts[event.key][0];
+        viewport.y += shifts[event.key][1];
+        applyViewport();
+      } else if (['+', '=', '-', '0'].includes(event.key)) {
+        event.preventDefault();
+        if (event.key === '0') fitMap();
+        else zoomAt(viewport.scale * (event.key === '-' ? 1 / 1.2 : 1.2), canvas.clientWidth / 2, canvas.clientHeight / 2);
+      }
+    });
+    document.getElementById('zoom-in').onclick = () => zoomAt(viewport.scale * 1.2, canvas.clientWidth / 2, canvas.clientHeight / 2);
+    document.getElementById('zoom-out').onclick = () => zoomAt(viewport.scale / 1.2, canvas.clientWidth / 2, canvas.clientHeight / 2);
+    document.getElementById('fit').onclick = fitMap;
+    document.getElementById('list-toggle').onclick = event => {
+      const list = document.getElementById('list-view');
+      list.hidden = !list.hidden;
+      event.currentTarget.setAttribute('aria-expanded', String(!list.hidden));
+      frameHeight();
+    };
+    window.addEventListener('message', event => {
+      if (event.source !== window.parent || event.data?.type !== 'streamlit:render') return;
+      const theme = event.data.theme;
+      if (theme?.base) document.documentElement.dataset.theme = theme.base === 'light' ? 'light' : 'dark';
+      render(event.data.args);
+    });
+    let previousWidth = canvas.clientWidth;
+    new ResizeObserver(() => {
+      const nextWidth = canvas.clientWidth;
+      if (initialized && previousWidth) viewport.x += (nextWidth - previousWidth) / 2;
+      previousWidth = nextWidth;
+      viewport.scale = clampScale(viewport.scale);
+      applyViewport();
+      frameHeight();
+    }).observe(document.getElementById('shell'));
     window.parent.postMessage({ isStreamlitMessage: true, type: 'streamlit:componentReady', apiVersion: 1 }, '*');
   </script>
 </body>

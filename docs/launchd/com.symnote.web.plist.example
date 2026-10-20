@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  SymNote Web サーバー（symnote-web）常駐用 launchd 設定例
+
+  設置手順:
+    1. パス内の YOUR_USERNAME をご自身の Mac ユーザー名に書き換える
+    2. ~/Library/LaunchAgents/com.symnote.web.plist にコピーする
+    3. launchctl load -w ~/Library/LaunchAgents/com.symnote.web.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.symnote.web</string>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/YOUR_USERNAME/symnote</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOUR_USERNAME/symnote/.venv/bin/python</string>
+    <string>-m</string>
+    <string>symnote.web_server</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8000</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOUR_USERNAME/Library/Logs/symnote-web.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/YOUR_USERNAME/Library/Logs/symnote-web.err.log</string>
+</dict>
+</plist>
