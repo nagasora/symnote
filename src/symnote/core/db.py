@@ -463,6 +463,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_due_date ON items(due_date);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_kind ON items(kind);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_items_completed_at ON items(completed_at);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_calendar_outbox_changed ON calendar_sync_outbox(changed_at);")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_calendar_morning_digest_synced "
@@ -504,7 +505,6 @@ def init_db() -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mindmap_project ON mindmap_nodes(project_id);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mindmap_parent ON mindmap_nodes(parent_id);")
-        
 
 
 def insert_item(
@@ -521,6 +521,8 @@ def insert_item(
     effort: Optional[str] = None,
     energy: Optional[str] = None,
     recurrence_rule_id: Optional[int] = None,
+    goal_id: Optional[int] = None,
+    estimate_minutes: Optional[int] = None,
 ) -> int:
     """汎用的なアイテム登録。"""
     with connection() as conn, conn:
@@ -539,6 +541,8 @@ def insert_item(
             effort=effort,
             energy=energy,
             recurrence_rule_id=recurrence_rule_id,
+            goal_id=goal_id,
+            estimate_minutes=estimate_minutes,
         )
 
 
@@ -557,6 +561,8 @@ def insert_item_in_transaction(
     effort: Optional[str] = None,
     energy: Optional[str] = None,
     recurrence_rule_id: Optional[int] = None,
+    goal_id: Optional[int] = None,
+    estimate_minutes: Optional[int] = None,
 ) -> int:
     """呼び出し側のトランザクション内でアイテムを登録し、その ID を返す。"""
     if not date_str:
@@ -572,9 +578,9 @@ def insert_item_in_transaction(
         INSERT INTO items (
           created_at, date, due_date, due_time, kind, raw_text,
           ai_category, importance, urgency, effort, energy,
-          status, tags, embedding, recurrence_rule_id
+          status, tags, embedding, recurrence_rule_id, goal_id, estimate_minutes
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
         """,
         (
             now,
@@ -591,6 +597,8 @@ def insert_item_in_transaction(
             status,
             tags,
             recurrence_rule_id,
+            goal_id,
+            estimate_minutes,
         ),
     )
     item_id = int(cur.lastrowid)
@@ -612,6 +620,12 @@ def insert_task(
     due_time: Optional[str] = None,
     status: str = "inbox",
     recurrence_rule_id: Optional[int] = None,
+    importance: int = 3,
+    urgency: int = 3,
+    effort: Optional[str] = None,
+    energy: Optional[str] = None,
+    goal_id: Optional[int] = None,
+    estimate_minutes: Optional[int] = None,
 ) -> int:
     """タスクを直接登録する。"""
     task_id = insert_item(
@@ -623,9 +637,13 @@ def insert_task(
         due_time=due_time,
         status=status,
         ai_category="task",
-        importance=3,
-        urgency=3,
+        importance=importance,
+        urgency=urgency,
+        effort=effort,
+        energy=energy,
         recurrence_rule_id=recurrence_rule_id,
+        goal_id=goal_id,
+        estimate_minutes=estimate_minutes,
     )
     return task_id
 
@@ -641,6 +659,12 @@ def create_recurring_task(
     end_date: Optional[str] = None,
     weekdays: Tuple[int, ...] = (),
     month_day: Optional[int] = None,
+    importance: int = 3,
+    urgency: int = 3,
+    effort: Optional[str] = None,
+    energy: Optional[str] = None,
+    goal_id: Optional[int] = None,
+    estimate_minutes: Optional[int] = None,
 ) -> int:
     """繰り返し規則と最初のタスクを同一トランザクションで作成する。"""
     start_date = dt.date.fromisoformat(due_date)
@@ -684,10 +708,25 @@ def create_recurring_task(
             INSERT INTO items (
               created_at, date, due_date, due_time, kind, raw_text, ai_category,
               importance, urgency, effort, energy, status, tags, embedding,
-              recurrence_rule_id
-            ) VALUES (?, ?, ?, ?, 'task', ?, 'task', 3, 3, NULL, NULL, ?, ?, NULL, ?)
+              recurrence_rule_id, goal_id, estimate_minutes
+            ) VALUES (?, ?, ?, ?, 'task', ?, 'task', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
             """,
-            (now, dt.date.today().isoformat(), due_date, due_time, raw_text, status, tags, rule_id),
+            (
+                now,
+                dt.date.today().isoformat(),
+                due_date,
+                due_time,
+                raw_text,
+                importance,
+                urgency,
+                effort,
+                energy,
+                status,
+                tags,
+                rule_id,
+                goal_id,
+                estimate_minutes,
+            ),
         )
         task_id = int(cur.lastrowid)
         _queue_calendar_sync(conn, task_id, "upsert")
@@ -849,6 +888,54 @@ def _complete_task_in_transaction(conn: sqlite3.Connection, item_id: int) -> Opt
     return next_id
 
 
+def reopen_task(
+    item_id: int,
+    status: str = "today",
+    discard_next_task_id: Optional[int] = None,
+) -> ItemRow:
+    """完了タスクを未完了へ戻す。完了時に自動作成された次回分があれば安全に破棄する。"""
+    if status not in ("inbox", "today", "week"):
+        raise ValueError("status は inbox / today / week のいずれかです。")
+    with connection() as conn, conn:
+        task = conn.execute(
+            "SELECT id, kind, recurrence_rule_id FROM items WHERE id = ?",
+            (item_id,),
+        ).fetchone()
+        if task is None or task["kind"] != "task":
+            raise LookupError(f"タスク {item_id} は存在しません。")
+
+        conn.execute(
+            "UPDATE items SET status = ?, completed_at = NULL WHERE id = ?",
+            (status, item_id),
+        )
+        _queue_calendar_sync(conn, item_id, "upsert")
+
+        rule_id = task["recurrence_rule_id"]
+        if discard_next_task_id is not None and rule_id is not None and discard_next_task_id != item_id:
+            next_row = conn.execute(
+                "SELECT id, kind, status, recurrence_rule_id FROM items WHERE id = ?",
+                (discard_next_task_id,),
+            ).fetchone()
+            if (
+                next_row is not None
+                and next_row["kind"] == "task"
+                and next_row["status"] != "done"
+                and next_row["recurrence_rule_id"] == rule_id
+            ):
+                _queue_calendar_sync(conn, discard_next_task_id, "delete")
+                conn.execute("DELETE FROM items WHERE id = ?", (discard_next_task_id,))
+        if rule_id is not None:
+            conn.execute(
+                "UPDATE task_recurrence_rules SET active = 1 WHERE id = ?",
+                (rule_id,),
+            )
+
+    reopened = fetch_item(item_id)
+    if reopened is None:
+        raise LookupError(f"タスク {item_id} は存在しません。")
+    return reopened
+
+
 def stop_task_recurrence(item_id: int) -> None:
     """Stop generating future occurrences while preserving all task history."""
     with connection() as conn, conn:
@@ -860,6 +947,7 @@ def stop_task_recurrence(item_id: int) -> None:
                 "UPDATE task_recurrence_rules SET active = 0 WHERE id = ?",
                 (row["recurrence_rule_id"],),
             )
+
 
 def insert_standalone_memo(
     raw_text: str,
@@ -875,6 +963,127 @@ def insert_standalone_memo(
         status="inbox",
         ai_category="memo",
     )
+
+
+def insert_unsorted(
+    raw_text: str,
+    ai_suggestion: Optional["ClassificationResult"] = None,
+    date_str: Optional[str] = None,
+) -> int:
+    """受信箱の「あとで仕分け」に素のテキストを登録する。"""
+    return insert_item(
+        kind="memo",
+        raw_text=raw_text,
+        date_str=date_str,
+        status="inbox",
+        ai_category=ai_suggestion.ai_category if ai_suggestion is not None else None,
+        importance=ai_suggestion.importance if ai_suggestion is not None else None,
+        urgency=ai_suggestion.urgency if ai_suggestion is not None else None,
+        effort=ai_suggestion.effort if ai_suggestion is not None else None,
+        energy=ai_suggestion.energy if ai_suggestion is not None else None,
+    )
+
+
+def fetch_unsorted(limit: int = 100) -> List[ItemRow]:
+    """まだタスクにもメモにも確定していない「書き留めたもの」を新しい順に返す。"""
+    with connection() as conn:
+        cur = conn.execute(
+            """
+            SELECT id, kind, created_at, date, due_date, due_time, raw_text, tags,
+                   ai_category, importance, urgency, effort, energy, status
+            FROM items
+            WHERE kind = 'memo'
+              AND status = 'inbox'
+              AND COALESCE(ai_category, '') != 'memo'
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 200)),),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def count_unsorted() -> int:
+    """未仕分けアイテム数を返す。"""
+    with connection() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FROM items
+            WHERE kind = 'memo'
+              AND status = 'inbox'
+              AND COALESCE(ai_category, '') != 'memo'
+            """
+        ).fetchone()
+        return int(row[0])
+
+
+def sort_unsorted_item(
+    item_id: int,
+    as_kind: str,
+    *,
+    title: Optional[str] = None,
+    due_date: Optional[str] = None,
+    due_time: Optional[str] = None,
+    status: str = "today",
+) -> ItemRow:
+    """未仕分けの書き留めをタスクまたはメモとして確定する。"""
+    if as_kind not in ("task", "memo"):
+        raise ValueError("as_kind は task / memo のいずれかです。")
+    if status not in ("inbox", "today", "week"):
+        raise ValueError("status は inbox / today / week のいずれかです。")
+    with connection() as conn, conn:
+        row = conn.execute(
+            "SELECT * FROM items WHERE id = ?",
+            (item_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"アイテム {item_id} は存在しません。")
+        if not (
+            row["kind"] == "memo"
+            and row["status"] == "inbox"
+            and (row["ai_category"] or "") != "memo"
+        ):
+            raise ValueError(f"アイテム {item_id} はすでに仕分け済みです。")
+
+        if as_kind == "memo":
+            conn.execute(
+                "UPDATE items SET kind = 'memo', ai_category = 'memo', status = 'inbox' WHERE id = ?",
+                (item_id,),
+            )
+        else:
+            raw_lines = str(row["raw_text"] or "").strip().splitlines()
+            default_title = raw_lines[0].strip() if raw_lines else f"タスク #{item_id}"
+            final_title = (title or "").strip() or str(row["tags"] or "").strip() or default_title
+            if due_time:
+                due_time = dt.time.fromisoformat(due_time).strftime("%H:%M")
+            conn.execute(
+                """
+                UPDATE items
+                SET kind = 'task',
+                    ai_category = 'task',
+                    tags = ?,
+                    due_date = ?,
+                    due_time = ?,
+                    status = ?,
+                    importance = COALESCE(importance, 3),
+                    urgency = COALESCE(urgency, 3),
+                    completed_at = NULL
+                WHERE id = ?
+                """,
+                (
+                    final_title,
+                    due_date if due_date is not None else row["due_date"],
+                    due_time if due_time is not None else row["due_time"],
+                    status,
+                    item_id,
+                ),
+            )
+            _queue_calendar_sync(conn, item_id, "upsert")
+
+    sorted_item = fetch_item(item_id)
+    if sorted_item is None:
+        raise LookupError(f"アイテム {item_id} は存在しません。")
+    return sorted_item
 
 
 def _detach_task_references(conn: sqlite3.Connection, task_id: int) -> None:
@@ -926,6 +1135,28 @@ def delete_item(item_id: int) -> None:
         conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
 
 
+_ITEM_WITH_RECURRENCE_SELECT = """
+    SELECT i.id, i.kind, i.created_at, i.date, i.due_date, i.due_time, i.raw_text, i.tags,
+           i.ai_category, i.importance, i.urgency, i.effort, i.energy, i.status,
+           i.recurrence_rule_id, i.goal_id, i.estimate_minutes, i.delegated_to, i.completed_at,
+           r.interval_days AS recurrence_interval_days, r.end_date AS recurrence_end_date,
+           r.frequency AS recurrence_frequency, r.weekdays AS recurrence_weekdays,
+           r.month_day AS recurrence_month_day, r.active AS recurrence_active
+    FROM items AS i
+    LEFT JOIN task_recurrence_rules AS r ON r.id = i.recurrence_rule_id
+"""
+
+
+def fetch_item(item_id: int) -> Optional[ItemRow]:
+    """指定 ID のアイテム（繰り返し規則列つき）を1件取得する。"""
+    with connection() as conn:
+        row = conn.execute(
+            f"{_ITEM_WITH_RECURRENCE_SELECT} WHERE i.id = ?",
+            (item_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+
 def fetch_inbox(limit: int = 50) -> List[ItemRow]:
     """status='inbox' のメモや未処理タスクを新しい順に取得。"""
     with connection() as conn:
@@ -963,17 +1194,7 @@ def fetch_tasks(
     limit: int = 200,
 ) -> List[ItemRow]:
     """タスク(kind='task')を取得。status でフィルタ可能。"""
-    query = [
-        "SELECT i.id, i.kind, i.created_at, i.date, i.due_date, i.due_time, i.raw_text, i.tags,",
-        "i.ai_category,",
-        "i.importance, i.urgency, i.effort, i.energy, i.status, i.recurrence_rule_id,",
-        "i.goal_id, i.estimate_minutes, i.delegated_to,",
-        "r.interval_days AS recurrence_interval_days, r.end_date AS recurrence_end_date,",
-        "r.frequency AS recurrence_frequency, r.weekdays AS recurrence_weekdays,",
-        "r.month_day AS recurrence_month_day, r.active AS recurrence_active",
-        "FROM items AS i LEFT JOIN task_recurrence_rules AS r ON r.id = i.recurrence_rule_id",
-        "WHERE i.kind = 'task'",
-    ]
+    query = [_ITEM_WITH_RECURRENCE_SELECT, "WHERE i.kind = 'task'"]
     params: List[Any] = []
     if statuses:
         placeholders = ",".join("?" for _ in statuses)
@@ -991,13 +1212,13 @@ def fetch_items_by_date(date_str: str) -> List[ItemRow]:
     """指定日の items を kind/status など含めて取得。"""
     with connection() as conn:
         cur = conn.execute(
-        """
-        SELECT id, kind, status, raw_text, tags, importance, urgency, effort, energy, ai_category, due_date, date
-        FROM items
-        WHERE date = ?
-        ORDER BY created_at DESC
-        """,
-        (date_str,),
+            """
+            SELECT id, kind, status, raw_text, tags, importance, urgency, effort, energy, ai_category, due_date, date
+            FROM items
+            WHERE date = ?
+            ORDER BY created_at DESC
+            """,
+            (date_str,),
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -1006,15 +1227,76 @@ def fetch_tasks_due_on(date_str: str) -> List[ItemRow]:
     """指定日を期限とするタスクを取得。"""
     with connection() as conn:
         cur = conn.execute(
-        """
-        SELECT id, kind, status, raw_text, tags, importance, urgency, effort, energy, ai_category, due_date, date
-        FROM items
-        WHERE due_date = ? AND kind = 'task'
-        ORDER BY created_at DESC
-        """,
-        (date_str,),
+            f"{_ITEM_WITH_RECURRENCE_SELECT} WHERE i.due_date = ? AND i.kind = 'task' ORDER BY i.created_at DESC",
+            (date_str,),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def fetch_tasks_due_between(
+    start_date: str,
+    end_date: str,
+    include_done: bool = False,
+) -> List[ItemRow]:
+    """指定期間に期限があるタスクを期限順に取得する。"""
+    status_clause = "" if include_done else "AND i.status != 'done'"
+    with connection() as conn:
+        cur = conn.execute(
+            f"""
+            {_ITEM_WITH_RECURRENCE_SELECT}
+            WHERE i.kind = 'task'
+              AND i.due_date BETWEEN ? AND ?
+              {status_clause}
+            ORDER BY i.due_date ASC, COALESCE(i.due_time, '99:99') ASC, COALESCE(i.importance, 3) DESC, i.id ASC
+            """,
+            (start_date, end_date),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def fetch_tasks_completed_on(date_str: str) -> List[ItemRow]:
+    """指定日（YYYY-MM-DD）に完了したタスクを完了時刻の新しい順に返す。"""
+    with connection() as conn:
+        cur = conn.execute(
+            f"""
+            {_ITEM_WITH_RECURRENCE_SELECT}
+            WHERE i.kind = 'task'
+              AND i.status = 'done'
+              AND substr(COALESCE(i.completed_at, ''), 1, 10) = ?
+            ORDER BY i.completed_at DESC, i.id DESC
+            """,
+            (date_str,),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def fetch_task_sources(task_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
+    """承認済み候補から作られたタスクの出典情報をまとめて返す。"""
+    clean_ids = [int(tid) for tid in task_ids if tid is not None]
+    if not clean_ids:
+        return {}
+    marks = ",".join("?" for _ in clean_ids)
+    with connection() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id AS candidate_id, task_id, source, source_ref, source_url, excerpt
+            FROM task_candidates
+            WHERE status = 'approved'
+              AND task_id IN ({marks})
+            """,
+            clean_ids,
+        ).fetchall()
+    result: Dict[int, Dict[str, Any]] = {}
+    for row in rows:
+        tid = int(row["task_id"])
+        result[tid] = {
+            "candidate_id": int(row["candidate_id"]),
+            "source": row["source"],
+            "source_ref": row["source_ref"],
+            "source_url": row["source_url"],
+            "excerpt": row["excerpt"],
+        }
+    return result
 
 
 def fetch_tasks_for_today_view(today_str: str) -> List[ItemRow]:
@@ -1023,24 +1305,22 @@ def fetch_tasks_for_today_view(today_str: str) -> List[ItemRow]:
     条件:
     1. kind = 'task'
     2. status != 'done'
-    3. (status = 'today') OR (date <= today_str)
+    3. (status = 'today') OR (due_date <= today_str)
     """
     with connection() as conn:
         cur = conn.execute(
-        """
-        SELECT id, created_at, date, due_date, due_time, raw_text, tags, ai_category,
-               importance, urgency, effort, energy, status, goal_id, estimate_minutes, delegated_to
-        FROM items
-        WHERE kind = 'task'
-          AND status != 'done'
-          AND (status = 'today' OR (due_date IS NOT NULL AND due_date <= ?))
-        ORDER BY 
-            CASE WHEN status = 'today' THEN 0 ELSE 1 END,
-            CASE WHEN due_date IS NULL THEN 1 ELSE 0 END,
-            due_date ASC,
-            importance DESC
-        """,
-        (today_str,),
+            f"""
+            {_ITEM_WITH_RECURRENCE_SELECT}
+            WHERE i.kind = 'task'
+              AND i.status != 'done'
+              AND (i.status = 'today' OR (i.due_date IS NOT NULL AND i.due_date <= ?))
+            ORDER BY
+                CASE WHEN i.status = 'today' THEN 0 ELSE 1 END,
+                CASE WHEN i.due_date IS NULL THEN 1 ELSE 0 END,
+                i.due_date ASC,
+                COALESCE(i.importance, 3) DESC
+            """,
+            (today_str,),
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -1071,16 +1351,16 @@ def fetch_counts_by_date(start_date: str, end_date: str) -> List[Tuple[str, int,
     """期間内の日付ごとのタスク数/メモ数を集計。"""
     with connection() as conn:
         cur = conn.execute(
-        """
-        SELECT CASE WHEN kind = 'task' THEN due_date ELSE date END AS display_date,
-               SUM(CASE WHEN kind = 'task' AND status != 'done' THEN 1 ELSE 0 END) AS task_count,
-               SUM(CASE WHEN kind = 'memo' THEN 1 ELSE 0 END) AS memo_count
-        FROM items
-        WHERE (CASE WHEN kind = 'task' THEN due_date ELSE date END) BETWEEN ? AND ?
-        GROUP BY display_date
-        ORDER BY display_date
-        """,
-        (start_date, end_date),
+            """
+            SELECT CASE WHEN kind = 'task' THEN due_date ELSE date END AS display_date,
+                   SUM(CASE WHEN kind = 'task' AND status != 'done' THEN 1 ELSE 0 END) AS task_count,
+                   SUM(CASE WHEN kind = 'memo' THEN 1 ELSE 0 END) AS memo_count
+            FROM items
+            WHERE (CASE WHEN kind = 'task' THEN due_date ELSE date END) BETWEEN ? AND ?
+            GROUP BY display_date
+            ORDER BY display_date
+            """,
+            (start_date, end_date),
         )
         return [(r["display_date"], r["task_count"], r["memo_count"]) for r in cur.fetchall()]
 
@@ -1089,19 +1369,18 @@ def fetch_due_date_counts_by_date(start_date: str, end_date: str) -> List[Tuple[
     """期間内の日付ごとの期限タスク数を集計。"""
     with connection() as conn:
         cur = conn.execute(
-        """
-        SELECT due_date, COUNT(id) AS due_task_count
-        FROM items
-        WHERE due_date BETWEEN ? AND ?
-          AND kind = 'task'
-          AND status != 'done'
-        GROUP BY due_date
-        ORDER BY due_date
-        """,
-        (start_date, end_date),
+            """
+            SELECT due_date, COUNT(id) AS due_task_count
+            FROM items
+            WHERE due_date BETWEEN ? AND ?
+              AND kind = 'task'
+              AND status != 'done'
+            GROUP BY due_date
+            ORDER BY due_date
+            """,
+            (start_date, end_date),
         )
         return [(r["due_date"], r["due_task_count"]) for r in cur.fetchall()]
-
 
 
 def insert_weekly_review(payload: "WeeklyReviewPayload") -> int:
@@ -1143,10 +1422,14 @@ def update_item_fields(item_id: int, **fields: Any) -> None:
         "due_date",
         "due_time",
         "estimate_minutes",
+        "goal_id",
+        "delegated_to",
+        "completed_at",
     }
     updates: List[str] = []
     params: List[Any] = []
     completes = False
+    reopens = False
     for key, value in fields.items():
         if key not in allowed:
             continue
@@ -1154,8 +1437,12 @@ def update_item_fields(item_id: int, **fields: Any) -> None:
             # 完了は complete_task と同じ経路を通し、繰り返しの次回分を作らせる。
             completes = True
             continue
+        if key == "status" and value != "done":
+            reopens = True
         updates.append(f"{key} = ?")
         params.append(value)
+    if reopens and "completed_at" not in fields:
+        updates.append("completed_at = NULL")
     if not updates and not completes and recurrence_settings is None:
         return
     params.append(item_id)
@@ -1364,24 +1651,23 @@ def search_items(
     terms = [term for term in query.split() if term]
     if not terms or not kinds:
         return []
-    clauses: List[str] = [f"kind IN ({','.join('?' for _ in kinds)})"]
+    clauses: List[str] = [f"i.kind IN ({','.join('?' for _ in kinds)})"]
     params: List[Any] = list(kinds)
     if not include_done:
-        clauses.append("COALESCE(status, '') != 'done'")
+        clauses.append("COALESCE(i.status, '') != 'done'")
     for term in terms:
         escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         clauses.append(
-            "(raw_text LIKE ? ESCAPE '\\' OR COALESCE(tags, '') LIKE ? ESCAPE '\\')"
+            "(i.raw_text LIKE ? ESCAPE '\\' OR COALESCE(i.tags, '') LIKE ? ESCAPE '\\')"
         )
         params.extend([f"%{escaped}%", f"%{escaped}%"])
     params.append(max(1, min(int(limit), 100)))
     with connection() as conn:
         cur = conn.execute(
             f"""
-            SELECT id, kind, created_at, date, due_date, due_time, raw_text, tags, status
-            FROM items
+            {_ITEM_WITH_RECURRENCE_SELECT}
             WHERE {' AND '.join(clauses)}
-            ORDER BY created_at DESC, id DESC
+            ORDER BY i.created_at DESC, i.id DESC
             LIMIT ?
             """,
             params,

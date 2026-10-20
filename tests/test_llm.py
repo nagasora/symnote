@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 import pytest
 
+from symnote.config import load_config
 from symnote.core import llm
 
 
@@ -42,8 +43,29 @@ class FakeClient:
         self.closed = True
 
 
+class FakeOpenAIClient:
+    """Responses API の呼び出し引数と終了処理を記録する。"""
+
+    def __init__(self, outcomes: List[Any]) -> None:
+        self.outcomes = list(outcomes)
+        self.calls: List[Dict[str, Any]] = []
+        self.responses = self
+        self.closed = False
+
+    def create(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def configure(monkeypatch: pytest.MonkeyPatch) -> None:
     """実キーを使わず設定と待ち時間を固定する。"""
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("LLM_API_KEY", "fake-key")
     monkeypatch.setenv("LLM_MODEL", "custom-model")
     monkeypatch.setenv("MAX_TOKENS", "1234")
@@ -126,6 +148,7 @@ def test_permanent_errors_do_not_retry(monkeypatch: pytest.MonkeyPatch, status: 
 
 def test_missing_key_fails_before_client_creation(monkeypatch: pytest.MonkeyPatch) -> None:
     """キー未設定なら通信クライアントを作らない。"""
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("LLM_API_KEY", " ")
 
     def forbidden_factory(*args: Any) -> Any:
@@ -173,3 +196,108 @@ def test_time_budget_exhaustion_stops_before_request(monkeypatch: pytest.MonkeyP
         llm.generate_text("入力", timeout=1, client_factory=lambda *_: client)
     assert not client.calls
     assert client.closed
+
+
+def test_legacy_gemini_configuration_wins_when_provider_is_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """既存 Gemini 環境へ OpenAI キーを追加しても暗黙には切り替えない。"""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("LLM_API_KEY", "legacy-gemini-key")
+    monkeypatch.setenv("LLM_MODEL", "legacy-gemini-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "unused-openai-key")
+    monkeypatch.setenv("OPENAI_MODEL", "unused-openai-model")
+
+    config = load_config()
+
+    assert config.llm_provider == "gemini"
+    assert config.llm_api_key == "legacy-gemini-key"
+    assert config.llm_model == "legacy-gemini-model"
+
+
+def test_openai_key_is_fallback_when_legacy_key_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """新規環境は OPENAI_API_KEY だけでも既存 AI 機能を有効化できる。"""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("LLM_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    config = load_config()
+
+    assert config.llm_provider == "openai"
+    assert config.llm_api_key == "openai-key"
+    assert config.llm_model == "gpt-6-luna"
+
+
+def test_openai_json_uses_responses_api_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenAI 選択時は Responses API の構造化出力設定へ変換する。"""
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_API_KEY", "legacy-gemini-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key")
+    monkeypatch.setenv("OPENAI_MODEL", "custom-openai-model")
+    monkeypatch.setenv("MAX_TOKENS", "321")
+    client = FakeOpenAIClient(
+        [
+            {
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": '{"ok":true}'}],
+                    }
+                ],
+            }
+        ]
+    )
+    factory_args: List[Any] = []
+
+    def factory(key: str, timeout: int) -> FakeOpenAIClient:
+        factory_args.extend([key, timeout])
+        return client
+
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+
+    assert llm.generate_json("JSON で返す", schema, timeout=12, client_factory=factory) == {
+        "ok": True
+    }
+    assert factory_args == ["fake-openai-key", 12000]
+    call = client.calls[0]
+    assert call["model"] == "custom-openai-model"
+    assert call["input"] == "JSON で返す"
+    assert call["max_output_tokens"] == 321
+    assert call["store"] is False
+    assert call["text"]["format"] == {
+        "type": "json_schema",
+        "name": "symnote_response",
+        "schema": schema,
+    }
+    assert client.closed
+
+
+def test_explicit_openai_does_not_send_gemini_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OpenAI 明示時は Gemini キーを誤って OpenAI へ送らない。"""
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_API_KEY", "legacy-gemini-key")
+    monkeypatch.setenv("OPENAI_API_KEY", " ")
+
+    def forbidden_factory(*args: Any) -> Any:
+        pytest.fail("クライアントが生成されました")
+
+    with pytest.raises(llm.LLMUnavailableError, match="OPENAI_API_KEY"):
+        llm.generate_text("入力", client_factory=forbidden_factory)
+
+
+def test_openai_text_accepts_web_temperature_argument(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Web の temperature 引数は受け取り、推論モデルには送らない。"""
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-5-mini")
+    client = FakeOpenAIClient([{"status": "completed", "output_text": "成功"}])
+
+    assert (
+        llm.generate_text("入力", temperature=0.2, client_factory=lambda *_: client)
+        == "成功"
+    )
+    assert "temperature" not in client.calls[0]

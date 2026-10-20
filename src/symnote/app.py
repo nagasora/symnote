@@ -95,23 +95,8 @@ def _due_priority_tuple(task: Dict) -> Tuple[dt.date, float, int]:
 
 def _task_overview(tasks: List[Dict], today: dt.date | None = None) -> Dict[str, int]:
     """Return small, display-oriented task counts without changing task data."""
-    today = today or dt.date.today()
-    overview = {"active": 0, "today": 0, "overdue": 0, "done": 0}
-    for task in tasks:
-        if task.get("status") == "done":
-            overview["done"] += 1
-            continue
-        overview["active"] += 1
-        due_str = task.get("due_date")
-        try:
-            due = dt.date.fromisoformat(due_str) if due_str else None
-        except ValueError:
-            due = None
-        if due and due < today:
-            overview["overdue"] += 1
-        if task.get("status") == "today" or due == today:
-            overview["today"] += 1
-    return overview
+    from symnote.core.overview import task_overview
+    return task_overview(tasks, today=today)
 
 
 def _apply_app_style() -> None:

@@ -16,3 +16,6 @@ tests
 docs
 debug_gen.py
 GEMINI.md
+
+web/node_modules
+web/dist

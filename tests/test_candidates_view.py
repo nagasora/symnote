@@ -81,6 +81,7 @@ def test_home_task_heading_uses_single_line_title(monkeypatch, tmp_path) -> None
     from symnote.core.candidates import approve_candidate
 
     monkeypatch.setenv("DB_PATH", str(tmp_path / "heading.db"))
+    monkeypatch.setenv("LLM_API_KEY", "")
     init_db()
     candidate_id = propose_candidates(
         [validate_candidate(source="gmail", source_ref="m1", title="見積書に返信する",
@@ -92,6 +93,9 @@ def test_home_task_heading_uses_single_line_title(monkeypatch, tmp_path) -> None
     app.run()
 
     assert not app.exception
-    headings = [block.value for block in app.markdown if "見積書に返信する" in block.value]
+    headings = [
+        block.value for block in app.markdown
+        if block.value.startswith(("### ", "**")) and "見積書に返信する" in block.value
+    ]
     assert headings
     assert all("\n" not in heading for heading in headings)

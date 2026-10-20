@@ -7,14 +7,17 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import contextvars
 import datetime as dt
 import os
+from pathlib import Path
+import sqlite3
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Iterator, Optional
 
-from symnote.core.db import connection
+from symnote.core.db import SQLITE_BUSY_TIMEOUT_MS, connection
 
 DEFAULT_PER_MINUTE = 10
 DEFAULT_DAILY_PER_USER = 200
@@ -23,6 +26,10 @@ DEFAULT_MAX_PROMPT_CHARS = 30000
 LOCAL_SCOPE = "local"
 
 _current_scope: contextvars.ContextVar[str] = contextvars.ContextVar("llm_usage_scope", default=LOCAL_SCOPE)
+_system_usage_db_path: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "llm_usage_system_db_path",
+    default=None,
+)
 
 
 class UsageLimitExceeded(RuntimeError):
@@ -72,9 +79,41 @@ def set_usage_scope(scope: str) -> contextvars.Token:
     return _current_scope.set(scope.strip() or LOCAL_SCOPE)
 
 
+@contextmanager
+def use_usage_scope(scope: str, *, system_db_path: Optional[str] = None) -> Iterator[None]:
+    """スコープと（任意で）全体集計用の system.db パスを一時的に切り替える。"""
+    scope_token = _current_scope.set(scope.strip() or LOCAL_SCOPE)
+    db_token = _system_usage_db_path.set(system_db_path) if system_db_path is not None else None
+    try:
+        yield
+    finally:
+        _current_scope.reset(scope_token)
+        if db_token is not None:
+            _system_usage_db_path.reset(db_token)
+
+
 def current_scope() -> str:
     """現在の利用者スコープ。"""
     return _current_scope.get()
+
+
+@contextmanager
+def _usage_connection() -> Any:
+    sys_db = _system_usage_db_path.get()
+    if not sys_db:
+        with connection() as conn:
+            yield conn
+        return
+    if sys_db != ":memory:" and not sys_db.startswith("file:"):
+        Path(sys_db).expanduser().parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(sys_db, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+    conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA journal_mode = WAL")
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def _ensure_table(conn) -> None:  # type: ignore[no-untyped-def]
@@ -106,7 +145,7 @@ def acquire(scope: Optional[str] = None, *, now: Optional[float] = None, limits:
     now = time.time() if now is None else now
     limits = limits or load_limits()
     day = _today(now)
-    with connection() as conn:
+    with _usage_connection() as conn:
         _ensure_table(conn)
         # 判定と記録の間に他のタブ・プロセスが割り込むと上限を超えて通るため、書込ロックを先に取る。
         conn.execute("BEGIN IMMEDIATE")
@@ -151,7 +190,7 @@ def usage_snapshot(scope: Optional[str] = None, *, now: Optional[float] = None) 
     scope = scope or current_scope()
     now = time.time() if now is None else now
     day = _today(now)
-    with connection() as conn, conn:
+    with _usage_connection() as conn, conn:
         _ensure_table(conn)
         mine = conn.execute(
             "SELECT count(*) FROM llm_usage WHERE day = ? AND scope = ?", (day, scope)

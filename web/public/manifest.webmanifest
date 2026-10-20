@@ -1,0 +1,19 @@
+{
+  "name": "SymNote — AI時代のやわらかい紙のノート",
+  "short_name": "SymNote",
+  "description": "頭の中を書き出すだけでAIが整理し、今の1件を迷わず進められるタスク・ノート管理アプリ",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f5f1e8",
+  "theme_color": "#f5f1e8",
+  "lang": "ja",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

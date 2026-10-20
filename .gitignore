@@ -10,6 +10,8 @@ pytest_*/
 *.egg-info/
 dist/
 build/
+web/node_modules/
+web/dist/
 
 # Local configuration and user-owned application data
 .env

@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from symnote.config import is_absolute_db_path, load_config
 from symnote.core import candidates as candidate_store
 from symnote.core import db, delegation
+from symnote.core.titles import task_title as _task_title
 
 ToolResult = Dict[str, Any]
 TaskStatusFilter = Literal["active", "inbox", "today", "week", "done"]
@@ -72,15 +73,6 @@ def _preview(text: Optional[str]) -> str:
     """長い本文を AI へ返す前に切り詰める。"""
     value = text or ""
     return value if len(value) <= MAX_TEXT_PREVIEW else value[:MAX_TEXT_PREVIEW] + "…"
-
-
-def _task_title(row: Dict[str, Any]) -> str:
-    """タイトル（tags）が無い既存タスクは本文の 1 行目をタイトルとして扱う。"""
-    title = (row.get("tags") or "").strip()
-    if title:
-        return title
-    lines = (row.get("raw_text") or "").strip().splitlines()
-    return lines[0] if lines else f"（無題 #{row['id']}）"
 
 
 def _serialize_item(row: Dict[str, Any]) -> ToolResult:
