@@ -247,7 +247,7 @@ def authenticate_passcode(request: Request, entered: str) -> UserRecord:
     """合言葉（SYMNOTE_APP_PASSCODE）を検証してオーナーでログインする。"""
     expected = app_passcode()
     if not expected:
-        if is_loopback_request(request):
+        if auth_mode() == "local" and not e2e_mode_enabled() and is_loopback_request(request):
             return ensure_local_owner_user()
         raise PermissionError("合言葉ログインは設定されていません。")
     source = passcode_source(dict(request.headers))

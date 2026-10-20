@@ -22,7 +22,12 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("SYMNOTE_E2E", "1")
     monkeypatch.setenv("SYMNOTE_ALLOWED_HOSTS", "testserver")
     monkeypatch.setenv("SYMNOTE_PUBLIC_ORIGIN", "")
+    monkeypatch.setenv("SYMNOTE_TEST_MODE", "1")
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.delenv("SYMNOTE_APP_PASSCODE", raising=False)
+    monkeypatch.delenv("SYMNOTE_ALLOW_NO_PASSCODE", raising=False)
+    monkeypatch.delenv("SYMNOTE_GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("SYMNOTE_GOOGLE_CLIENT_SECRET", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("LLM_API_KEY", raising=False)
     return tmp_path
@@ -37,6 +42,102 @@ def _login_client(app, email: str, *, name: str = "", is_owner: bool = False) ->
     )
     assert res.status_code == 200, res.text
     return client
+
+
+def test_static_files_cannot_escape_dist_directory(
+    api_env: Path, tmp_path: Path,
+) -> None:
+    dist = tmp_path / "dist"
+    private = tmp_path / "dist-private"
+    dist.mkdir()
+    private.mkdir()
+    index = dist / "index.html"
+    index.write_text("<h1>SymNote test frontend</h1>", encoding="utf-8")
+    (dist / "app.js").write_text("window.SYMNOTE_TEST = true;", encoding="utf-8")
+    secret = private / "secret.txt"
+    secret.write_text("TOP-SECRET-STATIC-CONTENT", encoding="utf-8")
+    (dist / "linked-secret.txt").symlink_to(secret)
+
+    app = create_app(static_dir=dist)
+    client = TestClient(
+        app,
+        base_url="http://testserver",
+        client=("203.0.113.10", 43123),
+    )
+
+    valid = client.get("/app.js")
+    assert valid.status_code == 200
+    assert valid.text == "window.SYMNOTE_TEST = true;"
+
+    traversal = client.get("/%2e%2e/dist-private/secret.txt")
+    assert traversal.status_code == 404
+    assert "TOP-SECRET-STATIC-CONTENT" not in traversal.text
+
+    symlink = client.get("/linked-secret.txt")
+    assert symlink.status_code == 404
+    assert "TOP-SECRET-STATIC-CONTENT" not in symlink.text
+
+    index.unlink()
+    index.symlink_to(secret)
+    for path in ("/", "/unknown-spa-path"):
+        fallback = client.get(path)
+        assert fallback.status_code == 404
+        assert "TOP-SECRET-STATIC-CONTENT" not in fallback.text
+
+
+def test_default_allowed_hosts_reject_host_header_injection(
+    api_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SYMNOTE_ALLOWED_HOSTS", raising=False)
+    app = create_app()
+    client = TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 43124),
+    )
+
+    rejected = client.get("/api/tasks", headers={"Host": "attacker.example"})
+    assert rejected.status_code == 400
+    accepted = client.get("/api/tasks", headers={"Host": "127.0.0.1"})
+    assert accepted.status_code == 401
+    assert client.get("/api/health", headers={"Host": "127.0.0.1"}).status_code == 200
+
+
+def test_explicit_allowed_hosts_still_accepts_testserver(api_env: Path) -> None:
+    client = TestClient(create_app(), base_url="http://testserver")
+    assert client.get("/api/health").status_code == 200
+    assert client.get("/api/health", headers={"Host": "attacker.example"}).status_code == 400
+
+
+def test_google_mode_without_passcode_does_not_grant_implicit_owner(
+    api_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SYMNOTE_E2E", raising=False)
+    monkeypatch.delenv("SYMNOTE_APP_PASSCODE", raising=False)
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_ID", "synthetic-client")
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_SECRET", "synthetic-secret")
+    client = TestClient(create_app(), base_url="http://testserver")
+
+    assert client.get("/api/auth/me").json()["authenticated"] is False
+    response = client.post("/api/auth/login", json={"passcode": ""}, headers=CSRF)
+    assert response.status_code == 401
+    assert client.get("/api/auth/me").json()["authenticated"] is False
+
+
+def test_local_mode_without_credentials_keeps_loopback_auto_login(
+    api_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SYMNOTE_E2E", raising=False)
+    monkeypatch.delenv("SYMNOTE_APP_PASSCODE", raising=False)
+    monkeypatch.delenv("SYMNOTE_GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("SYMNOTE_GOOGLE_CLIENT_SECRET", raising=False)
+    client = TestClient(create_app(), base_url="http://testserver")
+
+    auth = client.get("/api/auth/me")
+    assert auth.status_code == 200
+    assert auth.json()["mode"] == "local"
+    assert auth.json()["authenticated"] is True
+    assert client.get("/api/tasks").status_code == 200
 
 
 def test_csrf_header_and_origin_enforcement(api_env: Path) -> None:

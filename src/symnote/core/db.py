@@ -922,8 +922,7 @@ def reopen_task(
                 and next_row["status"] != "done"
                 and next_row["recurrence_rule_id"] == rule_id
             ):
-                _queue_calendar_sync(conn, discard_next_task_id, "delete")
-                conn.execute("DELETE FROM items WHERE id = ?", (discard_next_task_id,))
+                _delete_item_in_transaction(conn, discard_next_task_id)
         if rule_id is not None:
             conn.execute(
                 "UPDATE task_recurrence_rules SET active = 1 WHERE id = ?",
@@ -1114,25 +1113,30 @@ def detach_goal_references(conn: sqlite3.Connection, goal_ids: Sequence[int]) ->
     conn.execute(f"UPDATE agent_reports SET goal_id = -goal_id WHERE goal_id IN ({marks})", list(goal_ids))
 
 
+def _delete_item_in_transaction(conn: sqlite3.Connection, item_id: int) -> None:
+    """アイテム本体と、その ID を参照するタスク関連状態を同一トランザクションで削除する。"""
+    row = conn.execute("SELECT kind FROM items WHERE id = ?", (item_id,)).fetchone()
+    if row and row["kind"] == "task":
+        # Retain the event mapping after the local task disappears so an
+        # interrupted/offline delete is retried on the next sync.
+        _queue_calendar_sync(conn, item_id, "delete")
+        # items.id は削除後に再利用されうる。獲得済みの報酬履歴は残しつつ、同じ ID の
+        # 新しいタスクの付与を妨げないよう、履歴側の task_id を負の値（再利用されない）へ退避する。
+        conn.execute(
+            "UPDATE quest_log SET task_id = -id WHERE task_id = ?",
+            (item_id,),
+        )
+        _detach_task_references(conn, item_id)
+        from symnote.core.timeblock import cancel_blocks_for_task
+
+        cancel_blocks_for_task(item_id, conn=conn)
+    conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
+
+
 def delete_item(item_id: int) -> None:
     """アイテムを削除する。"""
     with connection() as conn, conn:
-        row = conn.execute("SELECT kind FROM items WHERE id = ?", (item_id,)).fetchone()
-        if row and row["kind"] == "task":
-            # Retain the event mapping after the local task disappears so an
-            # interrupted/offline delete is retried on the next sync.
-            _queue_calendar_sync(conn, item_id, "delete")
-            # items.id は削除後に再利用されうる。獲得済みの報酬履歴は残しつつ、同じ ID の
-            # 新しいタスクの付与を妨げないよう、履歴側の task_id を負の値（再利用されない）へ退避する。
-            conn.execute(
-                "UPDATE quest_log SET task_id = -id WHERE task_id = ?",
-                (item_id,),
-            )
-            _detach_task_references(conn, item_id)
-            from symnote.core.timeblock import cancel_blocks_for_task
-
-            cancel_blocks_for_task(item_id, conn=conn)
-        conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
+        _delete_item_in_transaction(conn, item_id)
 
 
 _ITEM_WITH_RECURRENCE_SELECT = """

@@ -9,7 +9,7 @@ from typing import Any, Dict
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from symnote.core import db
+from symnote.core import db, delegation, focus
 from symnote.core.nlp import parse_quick_recurrence
 from symnote.core.recurrence import RecurrenceRule, first_occurrence, next_occurrence, rule_label
 
@@ -131,6 +131,57 @@ def test_existing_task_can_configure_change_and_stop(database: Path) -> None:
     db.set_task_recurrence(task_id, None)
     assert db.complete_task(task_id) is None
     assert len(db.fetch_tasks()) == 1
+
+
+def test_reopen_discards_next_occurrence_and_detaches_its_references(database: Path) -> None:
+    """完了取消で次回分を削除した後、再利用 ID に古い集中や関連状態を効かせない。"""
+    original = db.create_recurring_task("日次確認", "2026-10-20", "daily")
+    next_task = db.complete_task(original)
+    assert next_task is not None
+
+    report = delegation.record_progress(next_task, None, "作業中", suggested_status="done")
+    session = focus.start_session(next_task, 25)
+    with db.connection() as conn, conn:
+        quest_log = conn.execute(
+            "INSERT INTO quest_log(task_id, title, xp, gold, completed_at) "
+            "VALUES (?, '次回分', 10, 5, '2026-10-20T12:00:00')",
+            (next_task,),
+        ).lastrowid
+        time_block = conn.execute(
+            "INSERT INTO time_blocks "
+            "(day, task_id, title, start_time, end_time, status, created_at) "
+            "VALUES ('2999-01-01', ?, '次回分', '09:00', '09:25', 'planned', '2026-10-20T00:00:00')",
+            (next_task,),
+        ).lastrowid
+
+    reopened = db.reopen_task(original, discard_next_task_id=next_task)
+    assert reopened["status"] == "today"
+    assert db.fetch_item(next_task) is None
+    assert focus.active_session() is None
+
+    with db.connection() as conn:
+        assert tuple(
+            conn.execute(
+                "SELECT status, task_id FROM agent_reports WHERE id = ?", (report,)
+            ).fetchone()
+        ) == ("rejected", -next_task)
+        assert tuple(
+            conn.execute(
+                "SELECT outcome, task_id FROM focus_sessions WHERE id = ?", (session,)
+            ).fetchone()
+        ) == ("stopped", -next_task)
+        assert conn.execute(
+            "SELECT task_id FROM quest_log WHERE id = ?", (quest_log,)
+        ).fetchone()[0] == -quest_log
+        assert conn.execute(
+            "SELECT status FROM time_blocks WHERE id = ?", (time_block,)
+        ).fetchone()[0] == "cancelled"
+
+    replacement = db.insert_task("無関係な新規タスク")
+    assert replacement == next_task
+    with pytest.raises(focus.FocusSessionEndedError):
+        focus.finish_session(session, complete_task=True)
+    assert db.fetch_item(replacement)["status"] == "inbox"
 
 
 def test_editor_completion_uses_new_rule_atomically(database: Path) -> None:

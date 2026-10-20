@@ -1274,12 +1274,13 @@ def create_app(*, static_dir: Optional[Path] = None) -> Starlette:
         if dist_dir.is_dir():
             if rel:
                 candidate_file = (dist_dir / rel).resolve()
-                if (
-                    str(candidate_file).startswith(str(dist_dir))
-                    and candidate_file.is_file()
-                ):
+                if not candidate_file.is_relative_to(dist_dir):
+                    return _error("ファイルが見つかりません。", status_code=404, code="not_found")
+                if candidate_file.is_file():
                     return apply_security_headers(FileResponse(str(candidate_file)))
-            index_html = dist_dir / "index.html"
+            index_html = (dist_dir / "index.html").resolve()
+            if not index_html.is_relative_to(dist_dir):
+                return _error("ファイルが見つかりません。", status_code=404, code="not_found")
             if index_html.is_file():
                 return apply_security_headers(FileResponse(str(index_html)))
         return _json(
@@ -1291,11 +1292,13 @@ def create_app(*, static_dir: Optional[Path] = None) -> Starlette:
         )
 
     allowed_hosts_raw = os.getenv("SYMNOTE_ALLOWED_HOSTS", "").strip()
-    middleware: List[Middleware] = []
-    if allowed_hosts_raw:
-        hosts = [h.strip() for h in allowed_hosts_raw.split(",") if h.strip()]
-        if hosts:
-            middleware.append(Middleware(TrustedHostMiddleware, allowed_hosts=hosts))
+    hosts = [h.strip() for h in allowed_hosts_raw.split(",") if h.strip()]
+    if not hosts:
+        hosts = ["localhost", "127.0.0.1", "[::1]"]
+        public_hostname = urlparse(os.getenv("SYMNOTE_PUBLIC_ORIGIN", "").strip()).hostname
+        if public_hostname:
+            hosts.append(public_hostname)
+    middleware: List[Middleware] = [Middleware(TrustedHostMiddleware, allowed_hosts=hosts)]
 
     routes = [
         Route("/api/health", health_endpoint, methods=["GET"]),
