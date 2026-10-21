@@ -33,8 +33,12 @@ def connection() -> Any:
         conn.close()
 
 
-def get_connection() -> sqlite3.Connection:
-    """SQLite のコネクションを取得する。存在しない場合はパスを作成。"""
+def get_connection() -> Any:
+    """Return the explicitly selected storage connection (SQLite by default)."""
+    from symnote.core import postgres
+
+    if postgres.enabled():
+        return postgres.connect_data()
     config = load_config()
     if config.db_path != ":memory:" and not config.db_path.startswith("file:"):
         Path(config.db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
@@ -436,6 +440,11 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
 
 def init_db() -> None:
     """items テーブルを用意する（存在しなければ作成）。"""
+    from symnote.core import postgres
+
+    if postgres.enabled():
+        postgres.init_db(SCHEMA_VERSION)
+        return
     with connection() as conn, conn:
         conn.execute(
             """

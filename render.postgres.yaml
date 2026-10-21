@@ -1,0 +1,53 @@
+# Proposed paid resources. Review plan and data transfer before applying.
+services:
+  - type: web
+    name: symnote-web
+    runtime: docker
+    plan: 0.5c-512mb
+    region: singapore
+    dockerfilePath: ./docker/Dockerfile.web
+    healthCheckPath: /api/health
+    numInstances: 1
+    autoDeployTrigger: "off"
+    domains:
+      - app.symnote.app
+    envVars:
+      - key: SYMNOTE_STORAGE_BACKEND
+        value: postgres
+      - key: DATABASE_URL
+        fromDatabase:
+          name: symnote-postgres
+          property: connectionString
+      - key: SYMNOTE_PUBLIC_ORIGIN
+        value: https://app.symnote.app
+      - key: SYMNOTE_ALLOWED_HOSTS
+        value: app.symnote.app,*.onrender.com,127.0.0.1,localhost
+      - key: SYMNOTE_OWNER_EMAIL
+        sync: false
+      - key: SYMNOTE_GOOGLE_CLIENT_ID
+        sync: false
+      - key: SYMNOTE_GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: LLM_PROVIDER
+        value: openai
+      - key: OPENAI_MODEL
+        value: gpt-6-luna
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SYMNOTE_E2E
+        value: "0"
+      - key: SYMNOTE_ALLOW_NO_PASSCODE
+        value: "0"
+      - key: SYMNOTE_LLM_PER_MINUTE
+        value: "10"
+      - key: SYMNOTE_LLM_DAILY_PER_USER
+        value: "200"
+      - key: SYMNOTE_LLM_DAILY_GLOBAL
+        value: "1000"
+databases:
+  - name: symnote-postgres
+    plan: 0.1c-256mb
+    region: singapore
+    postgresMajorVersion: "18"
+    diskSizeGB: 1
+    ipAllowList: []

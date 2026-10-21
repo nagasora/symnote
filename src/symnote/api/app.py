@@ -69,7 +69,7 @@ from symnote.api.schemas import (
     UnsortedSortRequest,
 )
 from symnote.core import candidates as candidate_store
-from symnote.core import db, goals, mindmap, usage_limit
+from symnote.core import db, goals, mindmap, usage_limit, postgres
 from symnote.core.accounts import (
     UserRecord,
     complete_onboarding,
@@ -186,6 +186,12 @@ def _with_auth(
 
 
 async def health_endpoint(_request: Request) -> Response:
+    if postgres.enabled():
+        try:
+            with postgres.connection() as conn:
+                conn.execute("SELECT 1")
+        except Exception:
+            return _json({"ok": False, "storage": "unavailable"}, status_code=503)
     return _json({"ok": True})
 
 
@@ -196,7 +202,7 @@ async def auth_me_endpoint(request: Request) -> Response:
             "authenticated": user is not None,
             "mode": auth_mode(),
             "google_enabled": google_oauth_config() is not None,
-            "passcode_enabled": bool(app_passcode()),
+            "passcode_enabled": bool(app_passcode()) and not postgres.enabled(),
             "e2e_enabled": e2e_mode_enabled(),
             "user": _user_dict(user) if user else None,
             "csrf_header": "X-SymNote",
@@ -272,7 +278,8 @@ async def auth_google_start_endpoint(request: Request) -> Response:
         )
         return apply_security_headers(resp)
     except Exception as exc:
-        return _error(str(exc), status_code=400, code="oauth_unavailable")
+        logger.warning("Google login start failed: type=%s", type(exc).__name__)
+        return _error("Googleログインを開始できません。時間をおいて再試行してください。", status_code=503, code="oauth_unavailable")
 
 
 async def auth_google_callback_endpoint(request: Request) -> Response:

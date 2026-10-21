@@ -16,6 +16,7 @@ import urllib.request
 from starlette.requests import Request
 from starlette.responses import Response
 
+from symnote.core import postgres
 from symnote.core.accounts import (
     InviteRequiredError,
      SESSION_TTL_SECONDS,
@@ -26,6 +27,8 @@ from symnote.core.accounts import (
     get_user_by_session,
     invite_user,
     revoke_session,
+    save_web_oauth_state,
+    consume_web_oauth_state,
 )
 from symnote.core.runtime import PASSCODE_LIMITER, app_passcode, passcode_source
 
@@ -136,7 +139,12 @@ def resolve_request_user(request: Request) -> Optional[UserRecord]:
         if user is not None:
             return user
     # Google OAuth も合言葉も未設定で、かつローカルからのアクセスなら自動的にオーナーとして扱う
-    if auth_mode() == "local" and not e2e_mode_enabled() and is_loopback_request(request):
+    if (
+        not postgres.enabled()
+        and auth_mode() == "local"
+        and not e2e_mode_enabled()
+        and is_loopback_request(request)
+    ):
         return ensure_local_owner_user()
     return None
 
@@ -170,11 +178,21 @@ def build_google_authorization_url(request: Request) -> str:
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
     redirect_uri = f"{public_base_url(request)}/api/auth/google/callback"
-    _oauth_states[state] = OAuthPendingState(
+    pending = OAuthPendingState(
         code_verifier=code_verifier,
         redirect_uri=redirect_uri,
         created_at=now,
     )
+    if postgres.enabled():
+        save_web_oauth_state(
+            state,
+            json.dumps({
+                "code_verifier": code_verifier, "redirect_uri": redirect_uri, "created_at": now,
+            }),
+            now, ttl=OAUTH_STATE_TTL_SECONDS, max_states=MAX_OAUTH_STATES,
+        )
+    else:
+        _oauth_states[state] = pending
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -231,7 +249,11 @@ def complete_google_callback(state: str, code: str, browser_state: str) -> UserR
     # PKCE alone does not stop a different browser from submitting an attacker's callback.
     if not browser_state or not secrets.compare_digest(state, browser_state):
         raise ValueError("ログインを開始したブラウザからやり直してください。")
-    pending = _oauth_states.pop(state, None)
+    if postgres.enabled():
+        encoded = consume_web_oauth_state(state)
+        pending = OAuthPendingState(**json.loads(encoded)) if encoded else None
+    else:
+        pending = _oauth_states.pop(state, None)
     if pending is None or time.time() - pending.created_at > OAUTH_STATE_TTL_SECONDS:
         raise ValueError("ログインの有効期限が切れました。もう一度お試しください。")
     profile = exchange_google_code(code, pending)
@@ -245,6 +267,8 @@ def complete_google_callback(state: str, code: str, browser_state: str) -> UserR
 
 def authenticate_passcode(request: Request, entered: str) -> UserRecord:
     """合言葉（SYMNOTE_APP_PASSCODE）を検証してオーナーでログインする。"""
+    if postgres.enabled():
+        raise PermissionError("公開Web版ではGoogleログインを使用してください。")
     expected = app_passcode()
     if not expected:
         if auth_mode() == "local" and not e2e_mode_enabled() and is_loopback_request(request):

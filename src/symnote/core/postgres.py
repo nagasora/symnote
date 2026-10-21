@@ -1,0 +1,624 @@
+"""PostgreSQL compatibility layer for SymNote's SQLite-oriented core.
+
+PostgreSQL is opt-in.  The default storage path remains the local SQLite
+database, while Web requests can select an isolated schema per user through
+``user_schema``.
+"""
+
+from __future__ import annotations
+
+import contextvars
+import hashlib
+import os
+import re
+import sqlite3
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
+POSTGRES_SCHEMA_VERSION = 16
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
+OWNER_SCHEMA = "symnote_owner"
+SYSTEM_SCHEMA = "symnote_system"
+_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+_INSERT_TABLE = re.compile(
+    r'^\s*INSERT\s+INTO\s+(?:"?[a-z_][a-z0-9_]*"?\.)?"?([a-z_][a-z0-9_]*)"?',
+    re.IGNORECASE,
+)
+_IDENTITY_TABLES = {
+    "agent_reports",
+    "focus_sessions",
+    "goals",
+    "idea_sessions",
+    "items",
+    "llm_usage",
+    "mindmap_nodes",
+    "quest_log",
+    "reward_redemptions",
+    "rewards",
+    "secretary_messages",
+    "task_candidates",
+    "task_recurrence_rules",
+    "time_blocks",
+}
+_schema_scope: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "symnote_postgres_schema", default=OWNER_SCHEMA
+)
+
+
+class ConfigurationError(RuntimeError):
+    """PostgreSQL was selected without the required safe configuration."""
+
+
+def enabled() -> bool:
+    """Return true only when PostgreSQL was selected explicitly."""
+    return os.getenv("SYMNOTE_STORAGE_BACKEND", "").strip().lower() == "postgres"
+
+
+def _database_url() -> str:
+    dsn = os.getenv("DATABASE_URL", "").strip()
+    if not dsn:
+        raise ConfigurationError(
+            "SYMNOTE_STORAGE_BACKEND=postgres requires DATABASE_URL; "
+            "refusing to fall back to SQLite."
+        )
+    if dsn.startswith(("postgresql://", "postgres://")):
+        return dsn
+    try:
+        _driver().conninfo.conninfo_to_dict(dsn)
+    except Exception as exc:
+        raise ConfigurationError("DATABASE_URL must be a PostgreSQL URL or conninfo DSN.") from exc
+    return dsn
+
+
+def schema_for_user(user_id: str) -> str:
+    """Return a deterministic, non-identifying PostgreSQL schema name."""
+    normalized = str(user_id).strip()
+    if not normalized:
+        raise ValueError("user_id must not be empty")
+    if normalized == "owner":
+        return OWNER_SCHEMA
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:32]
+    return f"symnote_user_{digest}"
+
+
+def current_schema() -> str:
+    """Return the data schema selected for the current request context."""
+    return _schema_scope.get()
+
+
+@contextmanager
+def user_schema(user_id: str) -> Iterator[str]:
+    """Select one user's tenant schema for connections created in this context."""
+    schema = schema_for_user(user_id)
+    token = _schema_scope.set(schema)
+    try:
+        yield schema
+    finally:
+        _schema_scope.reset(token)
+
+
+def _driver() -> Any:
+    try:
+        import psycopg
+    except ImportError as exc:  # pragma: no cover - exercised only in incomplete installs
+        raise ConfigurationError(
+            "PostgreSQL storage requires psycopg 3. Install the project's PostgreSQL dependency."
+        ) from exc
+    return psycopg
+
+
+def _validate_schema(schema: str) -> str:
+    if not _IDENTIFIER.fullmatch(schema):
+        raise ValueError(f"Unsafe PostgreSQL schema name: {schema!r}")
+    return schema
+
+
+def _translate_error(exc: Exception) -> sqlite3.DatabaseError:
+    psycopg = _driver()
+    if isinstance(exc, psycopg.IntegrityError):
+        return sqlite3.IntegrityError(str(exc))
+    if isinstance(exc, psycopg.OperationalError):
+        return sqlite3.OperationalError(str(exc))
+    return sqlite3.DatabaseError(str(exc))
+
+
+class Row:
+    """A small sqlite3.Row-compatible view over a PostgreSQL result tuple."""
+
+    __slots__ = ("_keys", "_values", "_mapping")
+
+    def __init__(self, keys: Sequence[str], values: Sequence[Any]) -> None:
+        self._keys = tuple(keys)
+        self._values = tuple(values)
+        self._mapping = dict(zip(self._keys, self._values, strict=False))
+
+    def __getitem__(self, key: int | slice | str) -> Any:
+        if isinstance(key, (int, slice)):
+            return self._values[key]
+        return self._mapping[key]
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def keys(self) -> list[str]:
+        return list(self._keys)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._mapping.get(key, default)
+
+    def __repr__(self) -> str:
+        return f"Row({self._mapping!r})"
+
+
+class Cursor:
+    """Expose the cursor subset used by the SQLite-backed domain modules."""
+
+    def __init__(self, raw: Any, *, lastrowid: int | None = None) -> None:
+        self._raw = raw
+        self.lastrowid = lastrowid
+
+    @property
+    def rowcount(self) -> int:
+        return self._raw.rowcount
+
+    @property
+    def description(self) -> Any:
+        return self._raw.description
+
+    def _keys(self) -> list[str]:
+        if not self._raw.description:
+            return []
+        return [getattr(column, "name", column[0]) for column in self._raw.description]
+
+    def fetchone(self) -> Row | None:
+        raw_row = self._raw.fetchone()
+        return None if raw_row is None else Row(self._keys(), raw_row)
+
+    def fetchall(self) -> list[Row]:
+        keys = self._keys()
+        return [Row(keys, row) for row in self._raw.fetchall()]
+
+    def fetchmany(self, size: int | None = None) -> list[Row]:
+        keys = self._keys()
+        rows = self._raw.fetchmany() if size is None else self._raw.fetchmany(size)
+        return [Row(keys, row) for row in rows]
+
+    def close(self) -> None:
+        self._raw.close()
+
+    def __iter__(self) -> Iterator[Row]:
+        keys = self._keys()
+        for row in self._raw:
+            yield Row(keys, row)
+
+    def __enter__(self) -> Cursor:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+
+def _convert_qmark(sql: str) -> str:
+    """Convert qmark parameters outside SQL literals and comments to psycopg form."""
+    result: list[str] = []
+    index = 0
+    state = "code"
+    dollar_tag = ""
+    while index < len(sql):
+        char = sql[index]
+        following = sql[index + 1] if index + 1 < len(sql) else ""
+        if char == "%":
+            result.append("%%")
+            index += 1
+            continue
+        if state == "code":
+            if char == "'":
+                state = "single"
+            elif char == '"':
+                state = "double"
+            elif char == "-" and following == "-":
+                result.extend((char, following))
+                index += 2
+                state = "line_comment"
+                continue
+            elif char == "/" and following == "*":
+                result.extend((char, following))
+                index += 2
+                state = "block_comment"
+                continue
+            elif char == "$":
+                match = re.match(r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$", sql[index:])
+                if match:
+                    dollar_tag = match.group(0)
+                    result.append(dollar_tag)
+                    index += len(dollar_tag)
+                    state = "dollar"
+                    continue
+            elif char == "?":
+                result.append("%s")
+                index += 1
+                continue
+        elif state == "single" and char == "'":
+            if following == "'":
+                result.extend((char, following))
+                index += 2
+                continue
+            state = "code"
+        elif state == "double" and char == '"':
+            if following == '"':
+                result.extend((char, following))
+                index += 2
+                continue
+            state = "code"
+        elif state == "line_comment" and char in "\r\n":
+            state = "code"
+        elif state == "block_comment" and char == "*" and following == "/":
+            result.extend((char, following))
+            index += 2
+            state = "code"
+            continue
+        elif state == "dollar" and sql.startswith(dollar_tag, index):
+            result.append(dollar_tag)
+            index += len(dollar_tag)
+            state = "code"
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def _append_conflict_nothing(sql: str) -> str:
+    body = sql.rstrip()
+    semicolon = ";" if body.endswith(";") else ""
+    if semicolon:
+        body = body[:-1].rstrip()
+    return f"{body} ON CONFLICT DO NOTHING{semicolon}"
+
+
+def _append_returning_id(sql: str) -> str:
+    body = sql.rstrip()
+    semicolon = ";" if body.endswith(";") else ""
+    if semicolon:
+        body = body[:-1].rstrip()
+    return f"{body} RETURNING id{semicolon}"
+
+
+def _adapt_sql(sql: str, *, returning: bool = True) -> tuple[str, bool]:
+    """Adapt the finite SQLite syntax used by SymNote; reject no generic SQL."""
+    adapted, ignore_count = re.subn(
+        r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", "INSERT INTO", sql, count=1, flags=re.IGNORECASE
+    )
+    if ignore_count and "ON CONFLICT" not in adapted.upper():
+        adapted = _append_conflict_nothing(adapted)
+    adapted = re.sub(
+        r"strftime\(\s*'%Y-%m-%dT%H:%M:%f'\s*,\s*'now'\s*\)",
+        "to_char(clock_timestamp(), 'YYYY-MM-DD\"T\"HH24:MI:SS.MS')",
+        adapted,
+        flags=re.IGNORECASE,
+    )
+    adapted = re.sub(
+        r"MAX\(COALESCE\(importance,\s*0\),\s*5\)",
+        "GREATEST(COALESCE(importance, 0), 5)",
+        adapted,
+        flags=re.IGNORECASE,
+    )
+    adapted = re.sub(
+        r"ORDER\s+BY\s+created_at\s*,\s*rowid",
+        "ORDER BY created_at, client_id",
+        adapted,
+        flags=re.IGNORECASE,
+    )
+    adapted = re.sub(r"\bi\.raw_text\s+LIKE\b", "i.raw_text ILIKE", adapted, flags=re.IGNORECASE)
+    adapted = re.sub(
+        r"COALESCE\(i\.tags,\s*''\)\s+LIKE\b",
+        "COALESCE(i.tags, '') ILIKE",
+        adapted,
+        flags=re.IGNORECASE,
+    )
+    match = _INSERT_TABLE.match(adapted)
+    returns_id = bool(
+        returning
+        and match
+        and match.group(1).lower() in _IDENTITY_TABLES
+        and not re.search(r"\bRETURNING\b", adapted, flags=re.IGNORECASE)
+    )
+    if returns_id:
+        adapted = _append_returning_id(adapted)
+    return _convert_qmark(adapted), returns_id
+
+
+def _split_statements(script: str) -> list[str]:
+    """Split the static schema SQL on semicolons outside literals/comments."""
+    statements: list[str] = []
+    current: list[str] = []
+    state = "code"
+    index = 0
+    while index < len(script):
+        char = script[index]
+        following = script[index + 1] if index + 1 < len(script) else ""
+        if state == "code":
+            if char == "'":
+                state = "single"
+            elif char == '"':
+                state = "double"
+            elif char == "-" and following == "-":
+                current.extend((char, following))
+                index += 2
+                state = "line_comment"
+                continue
+            elif char == "/" and following == "*":
+                current.extend((char, following))
+                index += 2
+                state = "block_comment"
+                continue
+            elif char == ";":
+                statement = "".join(current).strip()
+                if statement:
+                    statements.append(statement)
+                current = []
+                index += 1
+                continue
+        elif state == "single" and char == "'":
+            if following == "'":
+                current.extend((char, following))
+                index += 2
+                continue
+            state = "code"
+        elif state == "double" and char == '"':
+            if following == '"':
+                current.extend((char, following))
+                index += 2
+                continue
+            state = "code"
+        elif state == "line_comment" and char in "\r\n":
+            state = "code"
+        elif state == "block_comment" and char == "*" and following == "/":
+            current.extend((char, following))
+            index += 2
+            state = "code"
+            continue
+        current.append(char)
+        index += 1
+    statement = "".join(current).strip()
+    if statement:
+        statements.append(statement)
+    return statements
+
+
+def _is_mutating_statement(sql: str) -> bool:
+    """Return whether a statement can change tenant-visible database state."""
+    statement = re.sub(r"\A(?:\s|--[^\r\n]*(?:\r?\n|\Z)|/\*.*?\*/)*", "", sql, flags=re.DOTALL)
+    if re.match(
+        r"(?:INSERT|UPDATE|DELETE|REPLACE|MERGE|CREATE|ALTER|DROP|TRUNCATE|COPY|WITH)\b",
+        statement,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    return bool(
+        re.match(
+            r"SELECT\s+(?:pg_catalog\.)?(?:setval|nextval)\s*\(",
+            statement,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+class Connection:
+    """DB-API-like wrapper retaining the transaction behavior SymNote expects."""
+
+    def __init__(self, raw: Any, schema: str) -> None:
+        self._raw = raw
+        self.schema = schema
+
+    @property
+    def closed(self) -> bool:
+        return self._raw.closed
+
+    def _transaction_active(self) -> bool:
+        psycopg = _driver()
+        return self._raw.info.transaction_status != psycopg.pq.TransactionStatus.IDLE
+
+    def _acquire_write_lock(self) -> None:
+        """Serialize writes in one tenant before PostgreSQL takes relation locks."""
+        if not self._transaction_active():
+            self._raw.execute("BEGIN")
+        self._raw.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (self.schema,),
+        )
+
+    def execute(self, query: str, parameters: Sequence[Any] | None = None) -> Cursor:
+        command = query.strip().rstrip(";").upper()
+        try:
+            if command in {"BEGIN", "BEGIN IMMEDIATE"}:
+                if not self._transaction_active():
+                    self._raw.execute("BEGIN")
+                if command == "BEGIN IMMEDIATE":
+                    self._acquire_write_lock()
+                    cursor = self._raw.execute("SELECT 1 WHERE FALSE")
+                else:
+                    cursor = self._raw.execute("SELECT 1 WHERE FALSE")
+                return Cursor(cursor)
+            if command == "COMMIT":
+                self._raw.commit()
+                return Cursor(self._raw.execute("SELECT 1 WHERE FALSE"))
+            if command == "ROLLBACK":
+                self._raw.rollback()
+                return Cursor(self._raw.execute("SELECT 1 WHERE FALSE"))
+            if _is_mutating_statement(query):
+                self._acquire_write_lock()
+            adapted, returns_id = _adapt_sql(query)
+            raw_cursor = self._raw.execute(adapted, tuple(parameters or ()))
+            lastrowid = None
+            if returns_id:
+                inserted = raw_cursor.fetchone()
+                if inserted is not None:
+                    lastrowid = int(inserted[0])
+            return Cursor(raw_cursor, lastrowid=lastrowid)
+        except _driver().Error as exc:
+            raise _translate_error(exc) from exc
+
+    def executemany(self, query: str, parameter_sets: Sequence[Sequence[Any]]) -> Cursor:
+        try:
+            if _is_mutating_statement(query):
+                self._acquire_write_lock()
+            adapted, _ = _adapt_sql(query, returning=False)
+            raw_cursor = self._raw.cursor()
+            raw_cursor.executemany(adapted, parameter_sets)
+            return Cursor(raw_cursor)
+        except _driver().Error as exc:
+            raise _translate_error(exc) from exc
+
+    def executescript(self, script: str) -> Cursor:
+        cursor: Cursor | None = None
+        for statement in _split_statements(script):
+            cursor = self.execute(statement)
+        if cursor is not None:
+            return cursor
+        return Cursor(self._raw.execute("SELECT 1 WHERE FALSE"))
+
+    def commit(self) -> None:
+        self._raw.commit()
+
+    def rollback(self) -> None:
+        self._raw.rollback()
+
+    def close(self) -> None:
+        self._raw.close()
+
+    def __enter__(self) -> Connection:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        if exc_type is None:
+            self.commit()
+        else:
+            self.rollback()
+
+
+def _connect_options(dsn: str) -> dict[str, Any]:
+    options: dict[str, Any] = {"application_name": "symnote"}
+    if "connect_timeout" not in _driver().conninfo.conninfo_to_dict(dsn):
+        options["connect_timeout"] = DEFAULT_CONNECT_TIMEOUT_SECONDS
+    return options
+
+
+def _connect_raw() -> Any:
+    psycopg = _driver()
+    try:
+        dsn = _database_url()
+        return psycopg.connect(dsn, **_connect_options(dsn))
+    except psycopg.Error as exc:
+        raise _translate_error(exc) from exc
+
+
+def _set_search_path(raw: Any, schema: str) -> None:
+    raw.execute("SELECT set_config('search_path', %s, false)", (f"{schema},public",))
+    raw.commit()
+
+
+def connect(schema: str | None = None) -> Connection:
+    """Connect to an existing data schema without running tenant DDL."""
+    selected = _validate_schema(schema or current_schema())
+    raw = _connect_raw()
+    try:
+        _set_search_path(raw, selected)
+    except Exception:
+        raw.close()
+        raise
+    return Connection(raw, selected)
+
+
+def connect_data() -> Connection:
+    """Connect to the tenant selected by ``user_schema`` (owner for local CLI)."""
+    return connect(current_schema())
+
+
+@contextmanager
+def connection(schema: str | None = None) -> Iterator[Connection]:
+    conn = connect(schema)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def connect_system() -> Connection:
+    """Connect to the shared account schema, creating only that schema if absent."""
+    psycopg = _driver()
+    raw = _connect_raw()
+    try:
+        with raw.transaction():
+            raw.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"schema:{SYSTEM_SCHEMA}",),
+            )
+            raw.execute(
+                psycopg.sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                    psycopg.sql.Identifier(SYSTEM_SCHEMA)
+                )
+            )
+        _set_search_path(raw, SYSTEM_SCHEMA)
+    except Exception:
+        raw.close()
+        raise
+    return Connection(raw, SYSTEM_SCHEMA)
+
+
+@contextmanager
+def system_connection() -> Iterator[Connection]:
+    conn = connect_system()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def init_db(schema_version: int = POSTGRES_SCHEMA_VERSION) -> None:
+    """Create or advance the current tenant schema to the supplied snapshot version."""
+    if schema_version != POSTGRES_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"PostgreSQL snapshot is version {POSTGRES_SCHEMA_VERSION}, not {schema_version}."
+        )
+    schema = _validate_schema(current_schema())
+    psycopg = _driver()
+    raw = _connect_raw()
+    schema_sql = Path(__file__).with_name("postgres_schema.sql").read_text(encoding="utf-8")
+    try:
+        with raw.transaction():
+            raw.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"schema:{schema}",)
+            )
+            raw.execute(
+                psycopg.sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                    psycopg.sql.Identifier(schema)
+                )
+            )
+            raw.execute("SELECT set_config('search_path', %s, true)", (f"{schema},public",))
+            raw.execute(
+                "CREATE TABLE IF NOT EXISTS _symnote_schema_migrations ("
+                "version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+            )
+            row = raw.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM _symnote_schema_migrations"
+            ).fetchone()
+            current = int(row[0])
+            if current > schema_version:
+                raise RuntimeError("This database requires a newer version of SymNote.")
+            if current < POSTGRES_SCHEMA_VERSION:
+                for statement in _split_statements(schema_sql):
+                    raw.execute(statement)
+                raw.execute(
+                    "INSERT INTO _symnote_schema_migrations(version) VALUES (%s) "
+                    "ON CONFLICT(version) DO NOTHING",
+                    (POSTGRES_SCHEMA_VERSION,),
+                )
+    except Exception:
+        raw.close()
+        raise
+    raw.close()

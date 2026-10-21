@@ -9,7 +9,8 @@ import sys
 import uvicorn
 
 from symnote.api.app import create_app
-from symnote.api.auth import auth_mode
+from symnote.api.auth import auth_mode, e2e_mode_enabled, google_oauth_config
+from symnote.core import postgres
 from symnote.core.accounts import configured_owner_email, invite_user
 from symnote.core.runtime import is_public_bind
 
@@ -28,6 +29,13 @@ def main(argv: list[str] | None = None) -> None:
         help="待受ポート（既定: 8000）",
     )
     args = parser.parse_args(argv)
+
+    if postgres.enabled() and (e2e_mode_enabled() or google_oauth_config() is None):
+        print(
+            "エラー: PostgreSQL公開Web版はGoogleログインが必須で、E2Eログインは利用できません。",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
     # 外部バインド時に認証設定が無ければ起動を拒否する（フェイルクローズ）
     if is_public_bind(args.host) and auth_mode() == "local":

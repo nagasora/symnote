@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import uuid
 from urllib.parse import parse_qs, urlparse
 import pytest
 from starlette.testclient import TestClient
@@ -14,8 +16,8 @@ from symnote.core.accounts import authenticate_email, invite_user, user_scope
 CSRF = {"X-SymNote": "1"}
 
 
-@pytest.fixture()
-def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+@pytest.fixture(params=["sqlite", "postgres"] if os.getenv("SYMNOTE_TEST_POSTGRES_DSN") else ["sqlite"])
+def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "owner" / "symnote.db"))
     monkeypatch.setenv("SYMNOTE_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("SYMNOTE_OWNER_EMAIL", "owner@example.com")
@@ -30,7 +32,26 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv("SYMNOTE_GOOGLE_CLIENT_SECRET", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("LLM_API_KEY", raising=False)
-    return tmp_path
+    if request.param == "postgres":
+        import psycopg
+        from psycopg import sql
+        from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+        admin_dsn = os.environ["SYMNOTE_TEST_POSTGRES_DSN"]
+        database = "symnote_web_test_" + uuid.uuid4().hex
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
+        parameters = conninfo_to_dict(admin_dsn)
+        parameters["dbname"] = database
+        monkeypatch.setenv("DATABASE_URL", make_conninfo(**parameters))
+        monkeypatch.setenv("SYMNOTE_STORAGE_BACKEND", "postgres")
+        try:
+            yield tmp_path
+        finally:
+            with psycopg.connect(admin_dsn, autocommit=True) as admin:
+                admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database)))
+    else:
+        yield tmp_path
 
 
 def _login_client(app, email: str, *, name: str = "", is_owner: bool = False) -> TestClient:
@@ -136,8 +157,13 @@ def test_local_mode_without_credentials_keeps_loopback_auto_login(
     auth = client.get("/api/auth/me")
     assert auth.status_code == 200
     assert auth.json()["mode"] == "local"
-    assert auth.json()["authenticated"] is True
-    assert client.get("/api/tasks").status_code == 200
+    from symnote.core import postgres
+    if postgres.enabled():
+        assert auth.json()["authenticated"] is False
+        assert client.get("/api/tasks").status_code == 401
+    else:
+        assert auth.json()["authenticated"] is True
+        assert client.get("/api/tasks").status_code == 200
 
 
 def test_csrf_header_and_origin_enforcement(api_env: Path) -> None:
@@ -185,6 +211,9 @@ def test_google_callback_requires_starting_browser_and_cannot_be_replayed(
     other_browser = TestClient(app, base_url="https://testserver")
     start = browser.get("/api/auth/google/start", follow_redirects=False)
     state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    from symnote.core import postgres
+    if postgres.enabled():
+        auth._oauth_states.clear()
     cookie = start.headers["set-cookie"]
     assert "HttpOnly" in cookie and "Secure" in cookie and "SameSite=lax" in cookie
     callback = f"/api/auth/google/callback?state={state}&code=test-code"
@@ -580,3 +609,107 @@ def test_onboarding_saves_profile_and_allows_goal_workflow(api_env):
     assert user['name'] == '検証ユーザー'
     assert client.get('/api/tasks').json()['tasks'] == []
     assert client.post('/api/goals', json={'title': '最初の目標'}, headers=CSRF).status_code == 200
+
+
+def test_ai_limit_is_atomic_across_connections(api_env: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from symnote.core import usage_limit
+    from symnote.core.accounts import system_db_path
+
+    invite_user("owner@example.com", is_owner=True)
+    target = system_db_path()
+    limits = usage_limit.UsageLimits(per_minute=2, daily_per_user=10, daily_global=10)
+
+    def attempt(_):
+        with usage_limit.use_usage_scope("concurrent-user", system_db_path=target):
+            try:
+                usage_limit.acquire(now=1792500000.0, limits=limits)
+                return True
+            except usage_limit.UsageLimitExceeded:
+                return False
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        accepted = list(pool.map(attempt, range(8)))
+    assert sum(accepted) == 2
+
+
+def test_postgres_import_export_preserves_data_and_refuses_overwrite(api_env: Path, monkeypatch) -> None:
+    import hashlib
+    import sqlite3
+    from symnote.config import use_db_path
+    from symnote.core import db, postgres
+    from symnote.postgres_cli import export_sqlite, import_sqlite
+
+    if not postgres.enabled():
+        pytest.skip("PostgreSQL migration requires the real PostgreSQL test backend")
+    source = api_env / "local-source.db"
+    with monkeypatch.context() as local:
+        local.setenv("SYMNOTE_STORAGE_BACKEND", "sqlite")
+        with use_db_path(str(source)):
+            db.init_db()
+            item_id = db.insert_item("memo", "合成データ：日本語と NULL とバイナリ")
+            with db.connection() as conn, conn:
+                conn.execute("UPDATE items SET embedding = ? WHERE id = ?", (b"\x00\x01\xff", item_id))
+                conn.execute("CREATE TABLE gmail_import_processed(source_ref TEXT PRIMARY KEY, processed_at TEXT NOT NULL)")
+                conn.execute("INSERT INTO gmail_import_processed VALUES ('synthetic-ref', '2026-10-21')")
+    original = hashlib.sha256(source.read_bytes()).hexdigest()
+    result = import_sqlite(source, "owner")
+    assert result["tables"]["items"] == 1
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == original
+    with postgres.user_schema("owner"):
+        with db.connection() as conn:
+            assert conn.execute("SELECT embedding FROM items WHERE id = ?", (item_id,)).fetchone()[0] == b"\x00\x01\xff"
+        assert db.insert_item("memo", "移行後の新規データ") > item_id
+    with pytest.raises(ValueError, match="must be empty"):
+        import_sqlite(source, "owner")
+    output = api_env / "export.db"
+    exported = export_sqlite(output, "owner")
+    assert exported["tables"]["items"] == 2
+    assert exported["tables"]["gmail_import_processed"] == 1
+    with sqlite3.connect(output) as conn:
+        row = conn.execute("SELECT raw_text, embedding FROM items WHERE id = ?", (item_id,)).fetchone()
+        assert row == ("合成データ：日本語と NULL とバイナリ", b"\x00\x01\xff")
+        assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    with pytest.raises(FileExistsError):
+        export_sqlite(output, "owner")
+
+
+def test_oauth_start_hides_internal_errors(api_env, monkeypatch):
+    def fail(_request):
+        raise RuntimeError("private-db-host password=private-value")
+    monkeypatch.setattr("symnote.api.app.build_google_authorization_url", fail)
+    response = TestClient(create_app()).get("/api/auth/google/start")
+    assert response.status_code == 503
+    assert "private" not in response.text
+    assert "oauth_unavailable" in response.text
+
+
+def test_postgres_health_fails_closed(api_env, monkeypatch):
+    monkeypatch.setenv("SYMNOTE_STORAGE_BACKEND", "postgres")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    response = TestClient(create_app()).get("/api/health")
+    assert response.status_code == 503
+    assert response.json() == {"ok": False, "storage": "unavailable"}
+
+
+@pytest.mark.parametrize("e2e", [False, True])
+def test_postgres_server_requires_google_and_disables_e2e(monkeypatch, e2e):
+    from symnote.web_server import main
+    monkeypatch.setenv("SYMNOTE_STORAGE_BACKEND", "postgres")
+    monkeypatch.setenv("SYMNOTE_E2E", "1" if e2e else "0")
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_ID", "synthetic-client" if e2e else "")
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_SECRET", "synthetic-secret" if e2e else "")
+    with pytest.raises(SystemExit) as exc:
+        main(["--host", "127.0.0.1"])
+    assert exc.value.code == 2
+
+
+def test_postgres_rejects_inherited_owner_passcode(api_env, monkeypatch):
+    from symnote.core import postgres
+    if not postgres.enabled():
+        pytest.skip("PostgreSQL-only authentication policy")
+    monkeypatch.setenv("SYMNOTE_APP_PASSCODE", "synthetic-local-passcode")
+    client = TestClient(create_app())
+    assert client.get("/api/auth/me").json()["passcode_enabled"] is False
+    response = client.post("/api/auth/login", json={"passcode": "synthetic-local-passcode"}, headers=CSRF)
+    assert response.status_code == 401
