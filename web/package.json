@@ -10,7 +10,7 @@
     "ios:sync": "npm run build && cap sync ios",
     "ios:open": "cap open ios",
     "ios:add": "npm run build && cap add ios",
-    "test:device": "node --test tests/device-drafts.test.ts",
+    "test:device": "node --test tests/*.test.ts",
     "ios:build:simulator": "npm run ios:sync && node scripts/build-ios.mjs"
   },
   "dependencies": {

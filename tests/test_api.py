@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 import os
 import uuid
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
 import pytest
 from starlette.testclient import TestClient
 
 from symnote.api.app import create_app
 from symnote.core import candidates as candidate_store
-from symnote.core.accounts import authenticate_email, invite_user, user_scope
+from symnote.core.accounts import (
+    authenticate_email,
+    invite_user,
+    revoke_invite,
+    user_scope,
+)
 
 CSRF = {"X-SymNote": "1"}
 
@@ -139,7 +145,9 @@ def test_google_mode_without_passcode_does_not_grant_implicit_owner(
     monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_SECRET", "synthetic-secret")
     client = TestClient(create_app(), base_url="http://testserver")
 
-    assert client.get("/api/auth/me").json()["authenticated"] is False
+    auth_state = client.get("/api/auth/me").json()
+    assert auth_state["authenticated"] is False
+    assert auth_state["mobile_enabled"] is True
     response = client.post("/api/auth/login", json={"passcode": ""}, headers=CSRF)
     assert response.status_code == 401
     assert client.get("/api/auth/me").json()["authenticated"] is False
@@ -157,6 +165,7 @@ def test_local_mode_without_credentials_keeps_loopback_auto_login(
     auth = client.get("/api/auth/me")
     assert auth.status_code == 200
     assert auth.json()["mode"] == "local"
+    assert auth.json()["mobile_enabled"] is False
     from symnote.core import postgres
     if postgres.enabled():
         assert auth.json()["authenticated"] is False
@@ -234,6 +243,229 @@ def test_google_callback_requires_starting_browser_and_cannot_be_replayed(
     replayed = other_browser.get(callback, follow_redirects=False)
     assert replayed.headers["location"] == "/?auth_error=failed"
     assert exchanges == ["test-code"]
+
+
+def _begin_mobile_google_login(monkeypatch, app, *, email: str = "owner@example.com"):
+    from symnote.api import auth
+    from symnote.core.mobile_auth import verifier_challenge
+
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_ID", "test-client")
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_SECRET", "test-secret")
+    verifier = "v" * 64
+    app_state = "native-state-0123456789"
+    exchanges = []
+
+    def exchange(code, pending):
+        exchanges.append(code)
+        return {"email": email, "email_verified": True}
+
+    monkeypatch.setattr(auth, "exchange_google_code", exchange)
+    browser = TestClient(app, base_url="https://testserver")
+    start = browser.get(
+        "/api/auth/mobile/start",
+        params={"challenge": verifier_challenge(verifier), "app_state": app_state},
+        follow_redirects=False,
+    )
+    assert start.status_code == 302
+    assert start.headers["cache-control"] == "no-store"
+    assert start.headers["pragma"] == "no-cache"
+    assert start.headers["location"].startswith("https://accounts.google.com/")
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    assert auth.OAUTH_STATE_COOKIE_NAME in browser.cookies
+    return browser, state, verifier, app_state, exchanges
+
+
+def _complete_mobile_google_login(browser, state: str, *, google_code: str = "google-code"):
+    callback = browser.get(
+        f"/api/auth/google/callback?state={state}&code={google_code}",
+        follow_redirects=False,
+    )
+    assert callback.status_code == 302
+    assert callback.headers["cache-control"] == "no-store"
+    parsed = urlparse(callback.headers["location"])
+    assert parsed.scheme == "app.symnote.mobile"
+    assert parsed.netloc == "auth"
+    assert parsed.path == "/callback"
+    return callback, parse_qs(parsed.query)
+
+
+def test_mobile_google_login_pkce_replay_bearer_and_logout(
+    api_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invite_user("owner@example.com", is_owner=True)
+    app = create_app()
+    browser, state, verifier, app_state, exchanges = _begin_mobile_google_login(monkeypatch, app)
+
+    other_browser = TestClient(app, base_url="https://testserver")
+    wrong_browser = other_browser.get(
+        f"/api/auth/google/callback?state={state}&code=attacker-code",
+        follow_redirects=False,
+    )
+    assert wrong_browser.headers["location"] == "/?auth_error=failed"
+    assert exchanges == []
+
+    callback, callback_params = _complete_mobile_google_login(browser, state)
+    assert set(callback_params) == {"code", "app_state"}
+    assert callback_params["app_state"] == [app_state]
+    assert "session" not in callback.headers["location"]
+    assert "set-cookie" in callback.headers
+    assert "symnote_session" not in callback.headers["set-cookie"]
+    assert exchanges == ["google-code"]
+    code = callback_params["code"][0]
+
+    native = TestClient(app, base_url="https://testserver")
+    blocked_browser = native.post(
+        "/api/auth/mobile/exchange",
+        json={"code": code, "verifier": verifier},
+        headers={"X-SymNote": "1", "Origin": "https://testserver"},
+    )
+    assert blocked_browser.status_code == 403
+
+    wrong_verifier = native.post(
+        "/api/auth/mobile/exchange",
+        json={"code": code, "verifier": "w" * 64},
+        headers=CSRF,
+    )
+    assert wrong_verifier.status_code == 401
+    assert wrong_verifier.json()["error"]["code"] == "invalid_exchange"
+
+    exchanged = native.post(
+        "/api/auth/mobile/exchange",
+        json={"code": code, "verifier": verifier},
+        headers=CSRF,
+    )
+    assert exchanged.status_code == 200
+    assert exchanged.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in exchanged.headers
+    payload = exchanged.json()
+    assert set(payload) == {"session_token", "token_type", "expires_in"}
+    assert payload["token_type"] == "Bearer"
+    token = payload["session_token"]
+
+    replay = native.post(
+        "/api/auth/mobile/exchange",
+        json={"code": code, "verifier": verifier},
+        headers=CSRF,
+    )
+    assert replay.status_code == 401
+
+    bearer = {"Authorization": f"Bearer {token}", "X-SymNote": "1"}
+    assert native.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"}).json()[
+        "authenticated"
+    ] is False
+    assert native.get("/api/auth/me", headers=bearer).json()["authenticated"] is True
+    assert native.get("/api/tasks", headers=bearer).status_code == 200
+    assert native.post("/api/auth/logout", headers=bearer).json() == {"ok": True}
+    assert native.get("/api/auth/me", headers=bearer).json()["authenticated"] is False
+
+
+def test_mobile_exchange_code_expires_without_issuing_session(
+    api_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    from symnote.core.mobile_auth import MOBILE_CODE_TTL_SECONDS, exchange_mobile_code
+
+    invite_user("owner@example.com", is_owner=True)
+    app = create_app()
+    browser, state, verifier, _app_state, _exchanges = _begin_mobile_google_login(monkeypatch, app)
+    _callback, callback_params = _complete_mobile_google_login(browser, state)
+    code = callback_params["code"][0]
+    assert exchange_mobile_code(
+        code,
+        verifier,
+        now=time.time() + MOBILE_CODE_TTL_SECONDS + 1,
+    ) is None
+    response = TestClient(app, base_url="https://testserver").post(
+        "/api/auth/mobile/exchange",
+        json={"code": code, "verifier": verifier},
+        headers=CSRF,
+    )
+    assert response.status_code == 401
+    assert "session_token" not in response.text
+
+
+def test_mobile_exchange_rechecks_invite_and_consumes_rejected_code(
+    api_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invite_user("member@example.com")
+    app = create_app()
+    browser, state, verifier, _app_state, _exchanges = _begin_mobile_google_login(
+        monkeypatch, app, email="member@example.com"
+    )
+    _callback, callback_params = _complete_mobile_google_login(browser, state)
+    code = callback_params["code"][0]
+    assert revoke_invite("member@example.com") is True
+
+    native = TestClient(app, base_url="https://testserver")
+    rejected = native.post(
+        "/api/auth/mobile/exchange",
+        json={"code": code, "verifier": verifier},
+        headers=CSRF,
+    )
+    assert rejected.status_code == 401
+    invite_user("member@example.com")
+    replay = native.post(
+        "/api/auth/mobile/exchange",
+        json={"code": code, "verifier": verifier},
+        headers=CSRF,
+    )
+    assert replay.status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("challenge", "app_state"),
+    [
+        ("short", "native-state-0123456789"),
+        ("!" * 43, "native-state-0123456789"),
+        ("a" * 43, "short"),
+        ("a" * 43, "invalid+state-value"),
+    ],
+)
+def test_mobile_start_rejects_invalid_base64url_inputs(
+    api_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    challenge: str,
+    app_state: str,
+) -> None:
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_ID", "test-client")
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_SECRET", "test-secret")
+    response = TestClient(create_app(), base_url="https://testserver").get(
+        "/api/auth/mobile/start",
+        params={"challenge": challenge, "app_state": app_state},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_mobile_request"
+    assert "accounts.google.com" not in response.text
+
+
+def test_mobile_google_cancel_uses_fixed_callback_and_retains_mobile_marker(
+    api_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from symnote.core.mobile_auth import get_mobile_flow
+
+    invite_user("owner@example.com", is_owner=True)
+    app = create_app()
+    browser, state, _verifier, app_state, exchanges = _begin_mobile_google_login(monkeypatch, app)
+    cancelled = browser.get(
+        f"/api/auth/google/callback?state={state}&error=access_denied",
+        follow_redirects=False,
+    )
+    parsed = urlparse(cancelled.headers["location"])
+    assert (parsed.scheme, parsed.netloc, parsed.path) == (
+        "app.symnote.mobile",
+        "auth",
+        "/callback",
+    )
+    assert parse_qs(parsed.query) == {"error": ["cancelled"], "app_state": [app_state]}
+    assert exchanges == []
+    assert get_mobile_flow(state) is not None
+    replay = browser.get(
+        f"/api/auth/google/callback?state={state}&error=access_denied",
+        follow_redirects=False,
+    )
+    assert replay.headers["location"] == "/?auth_error=cancelled"
 
 
 def test_task_lifecycle_complete_reopen_and_today_view(api_env: Path) -> None:

@@ -1,3 +1,5 @@
+import { isNativeApp, nativeRequest } from "./nativeClient";
+
 export interface UserInfo {
   id: number;
   email: string;
@@ -10,6 +12,7 @@ export interface AuthState {
   authenticated: boolean;
   mode: string;
   google_enabled: boolean;
+  mobile_enabled?: boolean;
   passcode_enabled: boolean;
   e2e_enabled: boolean;
   user: UserInfo | null;
@@ -202,6 +205,15 @@ export async function apiFetch<T>(
   options: { method?: string; body?: unknown } = {},
 ): Promise<T> {
   const method = options.method ?? (options.body !== undefined ? "POST" : "GET");
+  if (isNativeApp()) {
+    const response = await nativeRequest(path, method, options.body);
+    if (response.status < 200 || response.status >= 300) {
+      const data = response.data as { error?: string | { message?: string } } | null;
+      const message = typeof data?.error === "string" ? data.error : data?.error?.message;
+      throw new Error(message || `通信エラーが発生しました (${response.status})`);
+    }
+    return response.data as T;
+  }
   const headers: Record<string, string> = {
     Accept: "application/json",
     "X-SymNote": "1",

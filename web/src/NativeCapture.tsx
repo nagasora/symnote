@@ -55,7 +55,7 @@ export function NativeCapture() {
           Share.share({ title: "SymNoteのメモ", text }).catch(() => {});
         }}>共有する</button>
       </div>
-      <p style={{ color: "var(--ink-2)", fontSize: 13 }}>クラウド同期は準備中です。このメモは自動送信されません。アプリを削除すると端末内のデータも失われるため、大切な内容は「共有する」から控えを残してください。</p>
+      <p style={{ color: "var(--ink-2)", fontSize: 13 }}>このメモは端末内専用で、自動送信されません。クラウドのタスク・メモ・ゴールは「クラウド」から開けます。アプリを削除すると端末内のデータも失われるため、大切な内容は「共有する」から控えを残してください。</p>
     </section>
   </main>;
 }
