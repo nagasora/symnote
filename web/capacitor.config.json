@@ -1,0 +1,11 @@
+{
+  "appId": "app.symnote.mobile",
+  "appName": "SymNote",
+  "webDir": "dist",
+  "ios": {
+    "contentInset": "automatic"
+  },
+  "server": {
+    "iosScheme": "capacitor"
+  }
+}
