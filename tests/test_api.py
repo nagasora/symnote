@@ -2,20 +2,58 @@
 
 from __future__ import annotations
 
+import os
+import uuid
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
 import pytest
 from starlette.testclient import TestClient
 
 from symnote.api.app import create_app
 from symnote.core import candidates as candidate_store
-from symnote.core.accounts import authenticate_email, invite_user, user_scope
+from symnote.core.accounts import (
+    authenticate_email,
+    invite_user,
+    revoke_invite,
+    user_scope,
+)
 
 CSRF = {"X-SymNote": "1"}
 
 
-@pytest.fixture()
-def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def test_trash_requires_approval_scope_and_restores_once(api_env: Path) -> None:
+    app = create_app()
+    owner = _login_client(app, "owner@example.com", is_owner=True)
+    invite_user("trash-member@example.com")
+    member = _login_client(app, "trash-member@example.com")
+    anonymous = TestClient(app)
+    assert anonymous.get("/api/trash").status_code == 401
+    task = owner.post("/api/tasks", json={"title": "復元する用事"}, headers=CSRF).json()["task"]
+    from symnote.core import db
+    with user_scope(authenticate_email("owner@example.com")):
+        with db.connection() as conn, conn:
+            conn.execute("UPDATE items SET embedding = ? WHERE id = ?", (b"\x00\xff", task["id"]))
+    assert owner.delete(f"/api/tasks/{task['id']}", headers=CSRF).status_code == 200
+    assert owner.get(f"/api/tasks/{task['id']}").status_code == 404
+    rows = owner.get("/api/trash").json()["items"]
+    assert len(rows) == 1
+    assert set(rows[0]) == {"id", "kind", "title", "deleted_at"}
+    trash_id = rows[0]["id"]
+    assert member.get("/api/trash").json()["items"] == []
+    endpoint = f"/api/trash/{trash_id}/restore"
+    assert owner.post(endpoint).status_code == 403
+    assert member.post(endpoint, headers=CSRF).status_code == 404
+    restored = owner.post(endpoint, headers=CSRF)
+    assert restored.status_code == 200, restored.text
+    new_id = restored.json()["restored_id"]
+    assert owner.get(f"/api/tasks/{new_id}").json()["task"]["title"] == "復元する用事"
+    assert owner.post(endpoint, headers=CSRF).status_code == 404
+    assert owner.get("/api/trash").json()["items"] == []
+
+
+@pytest.fixture(params=["sqlite", "postgres"] if os.getenv("SYMNOTE_TEST_POSTGRES_DSN") else ["sqlite"])
+def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "owner" / "symnote.db"))
     monkeypatch.setenv("SYMNOTE_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("SYMNOTE_OWNER_EMAIL", "owner@example.com")
@@ -30,7 +68,26 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv("SYMNOTE_GOOGLE_CLIENT_SECRET", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("LLM_API_KEY", raising=False)
-    return tmp_path
+    if request.param == "postgres":
+        import psycopg
+        from psycopg import sql
+        from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+        admin_dsn = os.environ["SYMNOTE_TEST_POSTGRES_DSN"]
+        database = "symnote_web_test_" + uuid.uuid4().hex
+        with psycopg.connect(admin_dsn, autocommit=True) as admin:
+            admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
+        parameters = conninfo_to_dict(admin_dsn)
+        parameters["dbname"] = database
+        monkeypatch.setenv("DATABASE_URL", make_conninfo(**parameters))
+        monkeypatch.setenv("SYMNOTE_STORAGE_BACKEND", "postgres")
+        try:
+            yield tmp_path
+        finally:
+            with psycopg.connect(admin_dsn, autocommit=True) as admin:
+                admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database)))
+    else:
+        yield tmp_path
 
 
 def _login_client(app, email: str, *, name: str = "", is_owner: bool = False) -> TestClient:
@@ -118,7 +175,9 @@ def test_google_mode_without_passcode_does_not_grant_implicit_owner(
     monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_SECRET", "synthetic-secret")
     client = TestClient(create_app(), base_url="http://testserver")
 
-    assert client.get("/api/auth/me").json()["authenticated"] is False
+    auth_state = client.get("/api/auth/me").json()
+    assert auth_state["authenticated"] is False
+    assert auth_state["mobile_enabled"] is True
     response = client.post("/api/auth/login", json={"passcode": ""}, headers=CSRF)
     assert response.status_code == 401
     assert client.get("/api/auth/me").json()["authenticated"] is False
@@ -136,8 +195,14 @@ def test_local_mode_without_credentials_keeps_loopback_auto_login(
     auth = client.get("/api/auth/me")
     assert auth.status_code == 200
     assert auth.json()["mode"] == "local"
-    assert auth.json()["authenticated"] is True
-    assert client.get("/api/tasks").status_code == 200
+    assert auth.json()["mobile_enabled"] is False
+    from symnote.core import postgres
+    if postgres.enabled():
+        assert auth.json()["authenticated"] is False
+        assert client.get("/api/tasks").status_code == 401
+    else:
+        assert auth.json()["authenticated"] is True
+        assert client.get("/api/tasks").status_code == 200
 
 
 def test_csrf_header_and_origin_enforcement(api_env: Path) -> None:
@@ -185,6 +250,9 @@ def test_google_callback_requires_starting_browser_and_cannot_be_replayed(
     other_browser = TestClient(app, base_url="https://testserver")
     start = browser.get("/api/auth/google/start", follow_redirects=False)
     state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    from symnote.core import postgres
+    if postgres.enabled():
+        auth._oauth_states.clear()
     cookie = start.headers["set-cookie"]
     assert "HttpOnly" in cookie and "Secure" in cookie and "SameSite=lax" in cookie
     callback = f"/api/auth/google/callback?state={state}&code=test-code"
@@ -205,6 +273,229 @@ def test_google_callback_requires_starting_browser_and_cannot_be_replayed(
     replayed = other_browser.get(callback, follow_redirects=False)
     assert replayed.headers["location"] == "/?auth_error=failed"
     assert exchanges == ["test-code"]
+
+
+def _begin_mobile_google_login(monkeypatch, app, *, email: str = "owner@example.com"):
+    from symnote.api import auth
+    from symnote.core.mobile_auth import verifier_challenge
+
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_ID", "test-client")
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_SECRET", "test-secret")
+    verifier = "v" * 64
+    app_state = "native-state-0123456789"
+    exchanges = []
+
+    def exchange(code, pending):
+        exchanges.append(code)
+        return {"email": email, "email_verified": True}
+
+    monkeypatch.setattr(auth, "exchange_google_code", exchange)
+    browser = TestClient(app, base_url="https://testserver")
+    start = browser.get(
+        "/api/auth/mobile/start",
+        params={"challenge": verifier_challenge(verifier), "app_state": app_state},
+        follow_redirects=False,
+    )
+    assert start.status_code == 302
+    assert start.headers["cache-control"] == "no-store"
+    assert start.headers["pragma"] == "no-cache"
+    assert start.headers["location"].startswith("https://accounts.google.com/")
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    assert auth.OAUTH_STATE_COOKIE_NAME in browser.cookies
+    return browser, state, verifier, app_state, exchanges
+
+
+def _complete_mobile_google_login(browser, state: str, *, google_code: str = "google-code"):
+    callback = browser.get(
+        f"/api/auth/google/callback?state={state}&code={google_code}",
+        follow_redirects=False,
+    )
+    assert callback.status_code == 302
+    assert callback.headers["cache-control"] == "no-store"
+    parsed = urlparse(callback.headers["location"])
+    assert parsed.scheme == "app.symnote.mobile"
+    assert parsed.netloc == "auth"
+    assert parsed.path == "/callback"
+    return callback, parse_qs(parsed.query)
+
+
+def test_mobile_google_login_pkce_replay_bearer_and_logout(
+    api_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invite_user("owner@example.com", is_owner=True)
+    app = create_app()
+    browser, state, verifier, app_state, exchanges = _begin_mobile_google_login(monkeypatch, app)
+
+    other_browser = TestClient(app, base_url="https://testserver")
+    wrong_browser = other_browser.get(
+        f"/api/auth/google/callback?state={state}&code=attacker-code",
+        follow_redirects=False,
+    )
+    assert wrong_browser.headers["location"] == "/?auth_error=failed"
+    assert exchanges == []
+
+    callback, callback_params = _complete_mobile_google_login(browser, state)
+    assert set(callback_params) == {"code", "app_state"}
+    assert callback_params["app_state"] == [app_state]
+    assert "session" not in callback.headers["location"]
+    assert "set-cookie" in callback.headers
+    assert "symnote_session" not in callback.headers["set-cookie"]
+    assert exchanges == ["google-code"]
+    code = callback_params["code"][0]
+
+    native = TestClient(app, base_url="https://testserver")
+    blocked_browser = native.post(
+        "/api/auth/mobile/exchange",
+        json={"code": code, "verifier": verifier},
+        headers={"X-SymNote": "1", "Origin": "https://testserver"},
+    )
+    assert blocked_browser.status_code == 403
+
+    wrong_verifier = native.post(
+        "/api/auth/mobile/exchange",
+        json={"code": code, "verifier": "w" * 64},
+        headers=CSRF,
+    )
+    assert wrong_verifier.status_code == 401
+    assert wrong_verifier.json()["error"]["code"] == "invalid_exchange"
+
+    exchanged = native.post(
+        "/api/auth/mobile/exchange",
+        json={"code": code, "verifier": verifier},
+        headers=CSRF,
+    )
+    assert exchanged.status_code == 200
+    assert exchanged.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in exchanged.headers
+    payload = exchanged.json()
+    assert set(payload) == {"session_token", "token_type", "expires_in"}
+    assert payload["token_type"] == "Bearer"
+    token = payload["session_token"]
+
+    replay = native.post(
+        "/api/auth/mobile/exchange",
+        json={"code": code, "verifier": verifier},
+        headers=CSRF,
+    )
+    assert replay.status_code == 401
+
+    bearer = {"Authorization": f"Bearer {token}", "X-SymNote": "1"}
+    assert native.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"}).json()[
+        "authenticated"
+    ] is False
+    assert native.get("/api/auth/me", headers=bearer).json()["authenticated"] is True
+    assert native.get("/api/tasks", headers=bearer).status_code == 200
+    assert native.post("/api/auth/logout", headers=bearer).json() == {"ok": True}
+    assert native.get("/api/auth/me", headers=bearer).json()["authenticated"] is False
+
+
+def test_mobile_exchange_code_expires_without_issuing_session(
+    api_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    from symnote.core.mobile_auth import MOBILE_CODE_TTL_SECONDS, exchange_mobile_code
+
+    invite_user("owner@example.com", is_owner=True)
+    app = create_app()
+    browser, state, verifier, _app_state, _exchanges = _begin_mobile_google_login(monkeypatch, app)
+    _callback, callback_params = _complete_mobile_google_login(browser, state)
+    code = callback_params["code"][0]
+    assert exchange_mobile_code(
+        code,
+        verifier,
+        now=time.time() + MOBILE_CODE_TTL_SECONDS + 1,
+    ) is None
+    response = TestClient(app, base_url="https://testserver").post(
+        "/api/auth/mobile/exchange",
+        json={"code": code, "verifier": verifier},
+        headers=CSRF,
+    )
+    assert response.status_code == 401
+    assert "session_token" not in response.text
+
+
+def test_mobile_exchange_rechecks_invite_and_consumes_rejected_code(
+    api_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invite_user("member@example.com")
+    app = create_app()
+    browser, state, verifier, _app_state, _exchanges = _begin_mobile_google_login(
+        monkeypatch, app, email="member@example.com"
+    )
+    _callback, callback_params = _complete_mobile_google_login(browser, state)
+    code = callback_params["code"][0]
+    assert revoke_invite("member@example.com") is True
+
+    native = TestClient(app, base_url="https://testserver")
+    rejected = native.post(
+        "/api/auth/mobile/exchange",
+        json={"code": code, "verifier": verifier},
+        headers=CSRF,
+    )
+    assert rejected.status_code == 401
+    invite_user("member@example.com")
+    replay = native.post(
+        "/api/auth/mobile/exchange",
+        json={"code": code, "verifier": verifier},
+        headers=CSRF,
+    )
+    assert replay.status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("challenge", "app_state"),
+    [
+        ("short", "native-state-0123456789"),
+        ("!" * 43, "native-state-0123456789"),
+        ("a" * 43, "short"),
+        ("a" * 43, "invalid+state-value"),
+    ],
+)
+def test_mobile_start_rejects_invalid_base64url_inputs(
+    api_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    challenge: str,
+    app_state: str,
+) -> None:
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_ID", "test-client")
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_SECRET", "test-secret")
+    response = TestClient(create_app(), base_url="https://testserver").get(
+        "/api/auth/mobile/start",
+        params={"challenge": challenge, "app_state": app_state},
+        follow_redirects=False,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_mobile_request"
+    assert "accounts.google.com" not in response.text
+
+
+def test_mobile_google_cancel_uses_fixed_callback_and_retains_mobile_marker(
+    api_env: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from symnote.core.mobile_auth import get_mobile_flow
+
+    invite_user("owner@example.com", is_owner=True)
+    app = create_app()
+    browser, state, _verifier, app_state, exchanges = _begin_mobile_google_login(monkeypatch, app)
+    cancelled = browser.get(
+        f"/api/auth/google/callback?state={state}&error=access_denied",
+        follow_redirects=False,
+    )
+    parsed = urlparse(cancelled.headers["location"])
+    assert (parsed.scheme, parsed.netloc, parsed.path) == (
+        "app.symnote.mobile",
+        "auth",
+        "/callback",
+    )
+    assert parse_qs(parsed.query) == {"error": ["cancelled"], "app_state": [app_state]}
+    assert exchanges == []
+    assert get_mobile_flow(state) is not None
+    replay = browser.get(
+        f"/api/auth/google/callback?state={state}&error=access_denied",
+        follow_redirects=False,
+    )
+    assert replay.headers["location"] == "/?auth_error=cancelled"
 
 
 def test_task_lifecycle_complete_reopen_and_today_view(api_env: Path) -> None:
@@ -580,3 +871,242 @@ def test_onboarding_saves_profile_and_allows_goal_workflow(api_env):
     assert user['name'] == '検証ユーザー'
     assert client.get('/api/tasks').json()['tasks'] == []
     assert client.post('/api/goals', json={'title': '最初の目標'}, headers=CSRF).status_code == 200
+
+
+def test_ai_limit_is_atomic_across_connections(api_env: Path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from symnote.core import usage_limit
+    from symnote.core.accounts import system_db_path
+
+    invite_user("owner@example.com", is_owner=True)
+    target = system_db_path()
+    limits = usage_limit.UsageLimits(per_minute=2, daily_per_user=10, daily_global=10)
+
+    def attempt(_):
+        with usage_limit.use_usage_scope("concurrent-user", system_db_path=target):
+            try:
+                usage_limit.acquire(now=1792500000.0, limits=limits)
+                return True
+            except usage_limit.UsageLimitExceeded:
+                return False
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        accepted = list(pool.map(attempt, range(8)))
+    assert sum(accepted) == 2
+
+
+def test_postgres_import_export_preserves_data_and_refuses_overwrite(api_env: Path, monkeypatch) -> None:
+    import hashlib
+    import sqlite3
+    from symnote.config import use_db_path
+    from symnote.core import db, postgres
+    from symnote.postgres_cli import export_sqlite, import_sqlite
+
+    if not postgres.enabled():
+        pytest.skip("PostgreSQL migration requires the real PostgreSQL test backend")
+    source = api_env / "local-source.db"
+    with monkeypatch.context() as local:
+        local.setenv("SYMNOTE_STORAGE_BACKEND", "sqlite")
+        with use_db_path(str(source)):
+            db.init_db()
+            item_id = db.insert_item("memo", "合成データ：日本語と NULL とバイナリ")
+            with db.connection() as conn, conn:
+                conn.execute("UPDATE items SET embedding = ? WHERE id = ?", (b"\x00\x01\xff", item_id))
+                conn.execute("CREATE TABLE gmail_import_processed(source_ref TEXT PRIMARY KEY, processed_at TEXT NOT NULL)")
+                conn.execute("INSERT INTO gmail_import_processed VALUES ('synthetic-ref', '2026-10-21')")
+    original = hashlib.sha256(source.read_bytes()).hexdigest()
+    result = import_sqlite(source, "owner")
+    assert result["tables"]["items"] == 1
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == original
+    with postgres.user_schema("owner"):
+        with db.connection() as conn:
+            assert conn.execute("SELECT embedding FROM items WHERE id = ?", (item_id,)).fetchone()[0] == b"\x00\x01\xff"
+        assert db.insert_item("memo", "移行後の新規データ") > item_id
+    with pytest.raises(ValueError, match="must be empty"):
+        import_sqlite(source, "owner")
+    output = api_env / "export.db"
+    exported = export_sqlite(output, "owner")
+    assert exported["tables"]["items"] == 2
+    assert exported["tables"]["gmail_import_processed"] == 1
+    with sqlite3.connect(output) as conn:
+        row = conn.execute("SELECT raw_text, embedding FROM items WHERE id = ?", (item_id,)).fetchone()
+        assert row == ("合成データ：日本語と NULL とバイナリ", b"\x00\x01\xff")
+        assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+    with pytest.raises(FileExistsError):
+        export_sqlite(output, "owner")
+
+
+def test_oauth_start_hides_internal_errors(api_env, monkeypatch):
+    def fail(_request):
+        raise RuntimeError("private-db-host password=private-value")
+    monkeypatch.setattr("symnote.api.app.build_google_authorization_url", fail)
+    response = TestClient(create_app()).get("/api/auth/google/start")
+    assert response.status_code == 503
+    assert "private" not in response.text
+    assert "oauth_unavailable" in response.text
+
+
+def test_postgres_health_fails_closed(api_env, monkeypatch):
+    monkeypatch.setenv("SYMNOTE_STORAGE_BACKEND", "postgres")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    response = TestClient(create_app()).get("/api/health")
+    assert response.status_code == 503
+    assert response.json() == {"ok": False, "storage": "unavailable"}
+
+
+@pytest.mark.parametrize("e2e", [False, True])
+def test_postgres_server_requires_google_and_disables_e2e(monkeypatch, e2e):
+    from symnote.web_server import main
+    monkeypatch.setenv("SYMNOTE_STORAGE_BACKEND", "postgres")
+    monkeypatch.setenv("SYMNOTE_E2E", "1" if e2e else "0")
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_ID", "synthetic-client" if e2e else "")
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_SECRET", "synthetic-secret" if e2e else "")
+    with pytest.raises(SystemExit) as exc:
+        main(["--host", "127.0.0.1"])
+    assert exc.value.code == 2
+
+
+def test_postgres_rejects_inherited_owner_passcode(api_env, monkeypatch):
+    from symnote.core import postgres
+    if not postgres.enabled():
+        pytest.skip("PostgreSQL-only authentication policy")
+    monkeypatch.setenv("SYMNOTE_APP_PASSCODE", "synthetic-local-passcode")
+    client = TestClient(create_app())
+    assert client.get("/api/auth/me").json()["passcode_enabled"] is False
+    response = client.post("/api/auth/login", json={"passcode": "synthetic-local-passcode"}, headers=CSRF)
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize("finish_via_focus", [False, True])
+def test_game_loop_rewards_focus_shop_and_buddy(api_env: Path, finish_via_focus: bool) -> None:
+    client = _login_client(create_app(), "owner@example.com", is_owner=True)
+    initial = client.get("/api/player").json()
+    assert initial["buddy"]["name"] == "ミナ"
+    patched = client.patch("/api/settings/buddy", json={"name": "ソラ", "user_name": "そら", "sound_enabled": False}, headers=CSRF)
+    assert patched.status_code == 200
+    assert client.get("/api/player").json()["buddy"]["name"] == "ソラ"
+    task = client.post("/api/tasks", json={"title": "一歩進む", "estimate_minutes": 15}, headers=CSRF).json()["task"]
+    assert task["quest"]["stars"] == 1
+    assert task["quest"]["xp"] > 0
+    today = client.get("/api/today").json()
+    assert today["daily_clear"]["target"] == 1
+    assert today["capacity"]["planned_minutes"] == 15
+    session = client.post("/api/focus", json={"task_id": task["id"], "minutes": 15}, headers=CSRF).json()["session"]
+    stopped = client.post(f"/api/focus/{session['id']}/stop", headers=CSRF)
+    assert stopped.status_code == 200
+    assert client.get("/api/focus").json()["session"] is None
+    if finish_via_focus:
+        session = client.post("/api/focus", json={"task_id": task["id"], "minutes": 15}, headers=CSRF).json()["session"]
+        complete = client.post(f"/api/focus/{session['id']}/finish", json={"complete_task": True}, headers=CSRF).json()
+    else:
+        complete = client.post(f"/api/tasks/{task['id']}/complete", headers=CSRF).json()
+    assert complete["reward"]["xp"] == task["quest"]["xp"]
+    assert complete["daily_clear"]["xp"] == 20
+    assert complete["reward"]["new_achievements"][0]["code"] == "first_quest"
+    xp = complete["player"]["xp_total"]
+    assert client.post(f"/api/tasks/{task['id']}/reopen", json={}, headers=CSRF).status_code == 200
+    again = client.post(f"/api/tasks/{task['id']}/complete", headers=CSRF).json()
+    assert again["reward"] is None and again["daily_clear"] is None
+    assert again["player"]["xp_total"] == xp
+    reward_id = client.post("/api/rewards", json={"title": "お茶", "cost": 1}, headers=CSRF).json()["id"]
+    gold = again["player"]["gold"]
+    assert client.post(f"/api/rewards/{reward_id}/redeem", headers=CSRF).json()["gold"] == gold - 1
+    expensive = client.post("/api/rewards", json={"title": "旅", "cost": 100000}, headers=CSRF).json()["id"]
+    no_gold = client.post(f"/api/rewards/{expensive}/redeem", headers=CSRF)
+    assert no_gold.status_code == 409 and no_gold.json()["code"] == "insufficient_gold"
+    assert client.delete(f"/api/rewards/{reward_id}", headers=CSRF).status_code == 200
+    assert len(client.get("/api/quests/history?days=28").json()["days"]) == 28
+    assert client.get("/api/review/weekly").status_code == 200
+
+
+def test_seed_preview_adoption_reports_and_game_user_boundaries(api_env: Path) -> None:
+    from symnote.core import db, delegation
+    owner = _login_client(create_app(), "owner@example.com", is_owner=True)
+    invite_user("game-member@example.com")
+    member = _login_client(create_app(), "game-member@example.com")
+    seed = owner.post("/api/seeds", json={"text": "小さなアプリを作る"}, headers=CSRF).json()["seed"]
+    seed_id = seed["id"]
+    preview = owner.post(f"/api/seeds/{seed_id}/plan", json={"why": "毎日を助ける", "done_when": "一人が使える"}, headers=CSRF)
+    assert preview.status_code == 200, preview.text
+    plan = preview.json()
+    assert plan["ai_used"] is False and len(plan["stages"]) == 3
+    assert owner.get("/api/maps").json()["maps"] == []
+    assert member.get("/api/seeds").json()["seeds"] == []
+    assert member.post(f"/api/seeds/{seed_id}/plan", json={}, headers=CSRF).status_code == 404
+    adopted = owner.post(f"/api/seeds/{seed_id}/adopt", json={"plan": plan, "today_first": True}, headers=CSRF)
+    assert adopted.status_code == 200, adopted.text
+    result = adopted.json()
+    assert owner.post(f"/api/seeds/{seed_id}/adopt", json={"plan": plan, "today_first": True}, headers=CSRF).json() == result
+    assert owner.get("/api/seeds").json()["seeds"] == []
+    view = owner.get(f"/api/maps/{result['goal_id']}").json()
+    assert view["current_task_id"] == result["task_ids"][0]
+    assert member.get(f"/api/maps/{result['goal_id']}").status_code in (400, 404)
+    with user_scope(authenticate_email("owner@example.com")):
+        report_id = delegation.record_progress(result["task_ids"][0], None, "一歩進みました")
+    assert len(owner.get("/api/reports").json()["reports"]) == 1
+    assert member.post(f"/api/reports/{report_id}/approve", headers=CSRF).status_code == 404
+    decided = owner.post(f"/api/reports/{report_id}/approve", headers=CSRF)
+    assert decided.status_code == 200 and decided.json()["triage_bonus"]["xp"] == 2
+    assert owner.post(f"/api/reports/{report_id}/approve", headers=CSRF).status_code == 409
+    assert member.get("/api/player").json()["xp_total"] == 0
+    assert owner.get("/api/player").json()["xp_total"] == 2
+    assert owner.patch("/api/settings/buddy", json={"name": "test"}).status_code == 403
+    assert TestClient(create_app()).get("/api/player").status_code == 401
+
+
+def test_today_capacity_is_unknown_without_calendar_and_merges_busy_intervals(api_env, monkeypatch):
+    import datetime as dt
+    from symnote.api import game
+    from symnote.core import calendar_events, google_calendar, runtime
+    client = _login_client(create_app(), "owner@example.com", is_owner=True)
+    assert client.get("/api/today").json()["capacity"]["free_minutes"] is None
+    monkeypatch.setattr(runtime, "is_test_mode", lambda: False)
+    monkeypatch.setattr(google_calendar, "is_connected", lambda: True)
+    day = dt.date.today().isoformat()
+    events = [
+        {"id": "a", "summary": "会議A", "start": {"dateTime": f"{day}T10:00:00+09:00"}, "end": {"dateTime": f"{day}T11:00:00+09:00"}},
+        {"id": "b", "summary": "会議B", "start": {"dateTime": f"{day}T10:30:00+09:00"}, "end": {"dateTime": f"{day}T12:00:00+09:00"}},
+    ]
+    monkeypatch.setattr(calendar_events, "fetch_events", lambda *args, **kwargs: calendar_events.EventFetchResult(events, fetched_at=day))
+    with user_scope(authenticate_email("owner@example.com")):
+        agenda, free = game.calendar_payload(authenticate_email("owner@example.com"), dt.date.today())
+    assert len(agenda) == 2
+    assert free == 22 * 60
+
+
+def test_capture_classifies_mixed_items_and_commits_atomically(api_env):
+    client = _login_client(create_app(), "owner@example.com", is_owner=True)
+    preview = client.post("/api/capture/split", json={"text": "資料を送る\nメモ：好きな本\nたね：新しいアプリを作りたい"}, headers=CSRF).json()
+    assert [item["kind"] for item in preview["items"]] == ["task", "memo", "seed"]
+    bad_items = [*preview["items"], {"title": "不正な日付", "due_date": "bad-date"}]
+    bad = client.post("/api/capture/commit-split", json={"items": bad_items, "source_text": "原文", "save_source_memo": True}, headers=CSRF)
+    assert bad.status_code == 400
+    assert client.get("/api/tasks?status=all").json()["tasks"] == []
+    assert client.get("/api/memos").json()["memos"] == []
+    committed = client.post("/api/capture/commit-split", json={"items": preview["items"]}, headers=CSRF)
+    assert committed.status_code == 200, committed.text
+    result = committed.json()
+    assert [len(result[key]) for key in ("tasks", "memos", "seeds")] == [1, 1, 1]
+    assert len(client.get("/api/seeds").json()["seeds"]) == 1
+    goal_id = client.post("/api/goals", json={"title": "既存の冒険"}, headers=CSRF).json()["goal"]["id"]
+    hidden = client.post("/api/capture/commit-split", json={"items": [{"kind": "seed", "title": "見えなくなるたね", "goal_id": goal_id}]}, headers=CSRF)
+    assert hidden.status_code == 400
+    assert len(client.get("/api/seeds").json()["seeds"]) == 1
+
+
+def test_quest_detail_recurrence_edits_and_rollback(api_env):
+    client = _login_client(create_app(), "owner@example.com", is_owner=True)
+    task = client.post("/api/tasks", json={"title": "習慣", "due_date": "2026-10-23"}, headers=CSRF).json()["task"]
+    endpoint = f"/api/tasks/{task['id']}"
+    added = client.patch(endpoint, json={"importance": 5, "effort": "long", "energy": "high", "recurrence": {"frequency": "weekly", "weekdays": [4]}}, headers=CSRF)
+    assert added.status_code == 200, added.text
+    edited = added.json()["task"]
+    assert edited["recurrence"]["frequency"] == "weekly"
+    assert edited["importance"] == 5 and edited["effort"] == "long" and edited["energy"] == "high"
+    failed = client.patch(endpoint, json={"title": "保存されてはいけない", "recurrence": {"frequency": "daily", "end_date": "2020-01-01"}}, headers=CSRF)
+    assert failed.status_code == 400
+    assert client.get(endpoint).json()["task"]["title"] == "習慣"
+    assert client.get(endpoint).json()["task"]["recurrence"]["frequency"] == "weekly"
+    stopped = client.patch(endpoint, json={"stop_recurrence": True}, headers=CSRF)
+    assert stopped.status_code == 200
+    assert "停止" in stopped.json()["task"]["recurrence"]["label"]

@@ -12,6 +12,8 @@ dist/
 build/
 web/node_modules/
 web/dist/
+web/test-results/
+web/playwright-report/
 
 # Local configuration and user-owned application data
 .env
@@ -31,3 +33,14 @@ Thumbs.db
 # Test coverage output
 .coverage
 htmlcov/
+
+# iOS machine-local and generated build state
+web/ios/**/xcuserdata/
+web/ios/DerivedData/
+web/ios/App/App/public/
+web/ios/App/App/capacitor.config.json
+web/ios/App/CapApp-SPM/.build/
+web/ios/App/CapApp-SPM/Package.resolved
+
+# TypeScript incremental build state
+*.tsbuildinfo

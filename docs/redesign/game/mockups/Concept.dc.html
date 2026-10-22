@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>コンセプトと部品</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@500;700;800&amp;family=Zen+Maru+Gothic:wght@500;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#1C6AA6}a:hover{color:#134d7a}
+.sn{font-family:"Zen Maru Gothic","Hiragino Maru Gothic ProN",system-ui,sans-serif;color:#3B2A20;background:#FFF6E6;font-weight:500}
+.h{font-family:"M PLUS Rounded 1c","Hiragino Maru Gothic ProN",system-ui,sans-serif;font-weight:800;letter-spacing:.01em}
+.num{font-family:"M PLUS Rounded 1c","Hiragino Maru Gothic ProN",system-ui,sans-serif;font-weight:800;font-variant-numeric:tabular-nums}
+.card{background:#FFFFFF;border:2px solid #F0DFC2;border-radius:20px;box-shadow:0 4px 0 #F0DFC2}
+.btn{font:inherit;font-weight:700;font-size:15px;border:0;border-radius:16px;min-height:48px;padding:0 20px;display:inline-flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;color:#3B2A20}
+.btn-sun{background:#FFC23D;box-shadow:0 4px 0 #E09A00}
+.btn-ghost{background:#FFFFFF;border:2px solid #F0DFC2;box-shadow:0 4px 0 #F0DFC2}
+.btn-press{transform:translateY(4px);box-shadow:0 0 0 #E09A00}
+.chip{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 10px;border-radius:999px;font-size:12px;font-weight:700;white-space:nowrap}
+.c-xp{background:#E3F6E9;color:#1F7A44}
+.c-coin{background:#FFF0C7;color:#8A5A00}
+.c-sky{background:#E2F2FD;color:#1C6AA6}
+.c-berry{background:#FFE6E1;color:#B53A28}
+.c-grape{background:#EEE8FF;color:#6045C2}
+.c-plain{background:#FFF0D6;color:#6B5546}
+.check{width:44px;height:44px;border-radius:14px;border:3px solid #E6D3B3;background:#FFFFFF;flex:none;display:flex;align-items:center;justify-content:center;padding:0;cursor:pointer;color:#FFFFFF}
+.check-done{background:#4CB872;border-color:#2E8A50;box-shadow:0 3px 0 #2E8A50}
+.check-boss{border-color:#FF7A66}
+.bar{height:14px;border-radius:999px;background:#F3E6CF;overflow:hidden}
+.bar-fill{display:block;height:100%;background:#4CB872;border-radius:999px;box-shadow:inset 0 -4px 0 rgba(0,0,0,.12)}
+.ico{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.muted{color:#6B5546}
+.faint{color:#7A6555}
+.sw{width:100%;height:72px;border-radius:16px}
+.label{font-size:12px;font-weight:700;color:#7A6555;letter-spacing:.06em}
+td,th{padding:9px 12px;text-align:left;border-bottom:2px dashed #F0DFC2;font-size:14px}
+th{font-size:12px;color:#7A6555}
+</style>
+</helmet>
+<div class="sn" style="width: 1440px; height: 1320px; box-sizing: border-box; padding: 64px 72px; display: flex; flex-direction: column; gap: 40px;">
+
+  <div style="display: flex; align-items: center; gap: 28px;">
+    <svg viewBox="0 0 64 64" width="112" height="112" aria-hidden="true">
+      <ellipse cx="25" cy="12" rx="8" ry="4.5" transform="rotate(-30 25 12)" fill="#4CB872"></ellipse>
+      <ellipse cx="39" cy="12" rx="8" ry="4.5" transform="rotate(30 39 12)" fill="#4CB872"></ellipse>
+      <rect x="31" y="12" width="2.4" height="9" rx="1.2" fill="#2E8A50"></rect>
+      <ellipse cx="32" cy="40" rx="24" ry="21" fill="#FFD36B" stroke="#E09A00" stroke-width="2"></ellipse>
+      <path d="M20 39q4-5 8 0M36 39q4-5 8 0" stroke="#3B2A20" stroke-width="2.6" fill="none" stroke-linecap="round"></path>
+      <ellipse cx="17" cy="46" rx="4" ry="2.5" fill="#FF9E8A"></ellipse>
+      <ellipse cx="47" cy="46" rx="4" ry="2.5" fill="#FF9E8A"></ellipse>
+      <path d="M27 45q5 7 10 0z" fill="#3B2A20"></path>
+    </svg>
+    <div style="display: flex; flex-direction: column; gap: 8px;">
+      <div class="label">SYMNOTE デザイン刷新案 ・ 方向性「ひだまりの冒険」</div>
+      <h1 class="h" style="margin: 0; font-size: 52px; line-height: 1.15;">毎日のTodoを、きょうのクエストに。</h1>
+      <p style="margin: 0; font-size: 18px; line-height: 1.7;" class="muted">相棒のミナと一緒に、小さく進めて、ちゃんと褒められる。AIは裏方にまわり、画面に出るのは「相棒の声」と「押した手応え」だけ。</p>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px;">
+    <div class="card" style="padding: 24px; display: flex; flex-direction: column; gap: 10px;">
+      <div class="chip c-sky" style="align-self: flex-start;">原則 1</div>
+      <h2 class="h" style="margin: 0; font-size: 22px;">AIは相棒の声で話す</h2>
+      <p style="margin: 0; font-size: 15px; line-height: 1.7;" class="muted">「✦ AIおすすめ」のラベルをやめる。提案はミナの吹き出しで、一人称のやさしい言葉。登録・完了・延期は必ずあなたが押してから。</p>
+    </div>
+    <div class="card" style="padding: 24px; display: flex; flex-direction: column; gap: 10px;">
+      <div class="chip c-xp" style="align-self: flex-start;">原則 2</div>
+      <h2 class="h" style="margin: 0; font-size: 22px;">責めない</h2>
+      <p style="margin: 0; font-size: 15px; line-height: 1.7;" class="muted">期限切れは赤字にせず「持ち越し」。減点なし。連続記録には週1回の「おやすみ券」。休んだ翌日は「おかえり」から始まる。</p>
+    </div>
+    <div class="card" style="padding: 24px; display: flex; flex-direction: column; gap: 10px;">
+      <div class="chip c-coin" style="align-self: flex-start;">原則 3</div>
+      <h2 class="h" style="margin: 0; font-size: 22px;">押した手応えがある</h2>
+      <p style="margin: 0; font-size: 15px; line-height: 1.7;" class="muted">厚みのあるボタンが沈む。チェックが弾み、+XPが飛び、バーが伸びる。きょうの分を全部クリアしたら宝箱。</p>
+    </div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px;">
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div class="label">ことばの置きかえ</div>
+      <div class="card" style="padding: 8px 12px;">
+        <table style="width: 100%; border-collapse: collapse;">
+          <thead><tr><th>いまの名前</th><th>新しい名前</th><th>意味</th></tr></thead>
+          <tbody>
+            <tr><td>今日</td><td><b>きょうの冒険</b></td><td class="muted">きょう挑むクエストの一覧</td></tr>
+            <tr><td>タスク / 完了</td><td><b>クエスト / クリア</b></td><td class="muted">★で重さ、+XPで報酬が見える</td></tr>
+            <tr><td>期限切れ</td><td><b>持ち越し</b></td><td class="muted">責めずに「きょうやる・日を変える・小さくする」</td></tr>
+            <tr><td>大きいタスク</td><td><b>大物クエスト</b></td><td class="muted">ミナと小分けにすると1歩ずつXP</td></tr>
+            <tr><td>受信箱 / AI候補</td><td><b>依頼ボード</b></td><td class="muted">メール・Slackから届いた依頼を受ける/見送る</td></tr>
+            <tr><td>ゴール / 子ゴール</td><td><b>冒険マップ / ステージ</b></td><td class="muted">道の上に次の一歩が光る</td></tr>
+            <tr><td>アイデア / ひらめき</td><td><b>たね</b></td><td class="muted">ミナと育てると地図になる</td></tr>
+            <tr><td>秘書</td><td><b>相棒（ミナ）</b></td><td class="muted">名前・口調は設定で変えられる</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 14px;">
+      <div class="label">色（意味は固定）</div>
+      <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;">
+        <div style="display: flex; flex-direction: column; gap: 6px;"><div class="sw" style="background: #FFC23D; box-shadow: 0 4px 0 #E09A00;"></div><b style="font-size: 14px;">おひさま</b><span class="faint" style="font-size: 12px;">#FFC23D 主ボタン・コイン</span></div>
+        <div style="display: flex; flex-direction: column; gap: 6px;"><div class="sw" style="background: #4CB872; box-shadow: 0 4px 0 #2E8A50;"></div><b style="font-size: 14px;">わかば</b><span class="faint" style="font-size: 12px;">#4CB872 クリア・XP</span></div>
+        <div style="display: flex; flex-direction: column; gap: 6px;"><div class="sw" style="background: #5AB8F5; box-shadow: 0 4px 0 #2E8BCB;"></div><b style="font-size: 14px;">そら</b><span class="faint" style="font-size: 12px;">#5AB8F5 予定・マップ</span></div>
+        <div style="display: flex; flex-direction: column; gap: 6px;"><div class="sw" style="background: #FF7A66; box-shadow: 0 4px 0 #D9533F;"></div><b style="font-size: 14px;">いちご</b><span class="faint" style="font-size: 12px;">#FF7A66 大物・大事</span></div>
+        <div style="display: flex; flex-direction: column; gap: 6px;"><div class="sw" style="background: #9C7BF2; box-shadow: 0 4px 0 #7556D6;"></div><b style="font-size: 14px;">ぶどう</b><span class="faint" style="font-size: 12px;">#9C7BF2 たね・ひらめき</span></div>
+        <div style="display: flex; flex-direction: column; gap: 6px;"><div class="sw" style="background: #FFF6E6; border: 2px solid #F0DFC2;"></div><b style="font-size: 14px;">はちみつミルク</b><span class="faint" style="font-size: 12px;">#FFF6E6 地の色</span></div>
+        <div style="display: flex; flex-direction: column; gap: 6px;"><div class="sw" style="background: #FFFFFF; border: 2px solid #F0DFC2; box-shadow: 0 4px 0 #F0DFC2;"></div><b style="font-size: 14px;">カード</b><span class="faint" style="font-size: 12px;">#FFFFFF 枠 #F0DFC2</span></div>
+        <div style="display: flex; flex-direction: column; gap: 6px;"><div class="sw" style="background: #3B2A20;"></div><b style="font-size: 14px;">ココア</b><span class="faint" style="font-size: 12px;">#3B2A20 文字</span></div>
+      </div>
+      <div class="label" style="margin-top: 12px;">文字</div>
+      <div class="card" style="padding: 18px 22px; display: flex; flex-direction: column; gap: 8px;">
+        <div class="h" style="font-size: 30px;">見出しと数字は M PLUS Rounded 1c</div>
+        <div style="font-size: 16px;">本文は Zen Maru Gothic。丸みで「道具」より「相棒」の手ざわりに。</div>
+        <div class="num" style="font-size: 26px; color: #1F7A44;">Lv 7 ・ +18 XP ・ 340 G</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 14px;">
+    <div class="label">部品</div>
+    <div style="display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 24px;">
+      <div class="card" style="padding: 8px 0;">
+        <div style="display: flex; align-items: center; gap: 14px; padding: 12px 18px;">
+          <button class="check" type="button" aria-label="クリアにする"></button>
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px;">
+            <b style="font-size: 16px;">田中さんへ見積書を送る</b>
+            <div style="display: flex; gap: 6px;"><span class="chip c-plain">★ 15分</span><span class="chip c-sky">18:00</span></div>
+          </div>
+          <span class="chip c-xp num">+12 XP</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-top: 2px dashed #F0DFC2;">
+          <button class="check check-boss" type="button" aria-label="クリアにする"></button>
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px;">
+            <b style="font-size: 16px;">ゼミ資料のスライドを仕上げる</b>
+            <div style="display: flex; gap: 6px;"><span class="chip c-berry">大物 ★★★</span><span class="chip c-grape">ゼミ発表マップ</span></div>
+          </div>
+          <span class="chip c-xp num">+34 XP</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-top: 2px dashed #F0DFC2;">
+          <button class="check check-done" type="button" aria-label="クリア済み。元に戻す">
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="stroke-width: 3.2;"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>
+          </button>
+          <div style="flex: 1; min-width: 0;"><b style="font-size: 16px; color: #7A6555; text-decoration: line-through;">週報を書く</b></div>
+          <span class="chip c-coin num">クリア +9 G</span>
+        </div>
+      </div>
+
+      <div class="card" style="padding: 22px; display: flex; flex-direction: column; gap: 16px;">
+        <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+          <button class="btn btn-sun" type="button">はじめる</button>
+          <button class="btn btn-sun btn-press" type="button">押した瞬間</button>
+          <button class="btn btn-ghost" type="button">あとで</button>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <div style="display: flex; justify-content: space-between; font-size: 13px;"><b class="num">Lv 7 駆け出しの旅人</b><span class="num faint">138 / 200 XP</span></div>
+          <div class="bar"><span class="bar-fill" style="width: 69%;"></span></div>
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <span class="chip c-xp">+XP</span><span class="chip c-coin">ゴールド</span><span class="chip c-sky">予定・時刻</span><span class="chip c-berry">大物</span><span class="chip c-grape">マップ・たね</span><span class="chip c-plain">★ 重さ</span>
+        </div>
+      </div>
+
+      <div class="card" style="padding: 22px; display: flex; flex-direction: column; gap: 14px;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-end;">
+          <div style="display: flex; flex-direction: column; align-items: center; gap: 6px;">
+            <svg viewBox="0 0 64 64" width="64" height="64" aria-hidden="true"><ellipse cx="25" cy="12" rx="8" ry="4.5" transform="rotate(-30 25 12)" fill="#4CB872"></ellipse><ellipse cx="39" cy="12" rx="8" ry="4.5" transform="rotate(30 39 12)" fill="#4CB872"></ellipse><rect x="31" y="12" width="2.4" height="9" rx="1.2" fill="#2E8A50"></rect><ellipse cx="32" cy="40" rx="24" ry="21" fill="#FFD36B" stroke="#E09A00" stroke-width="2"></ellipse><ellipse cx="24" cy="38" rx="3" ry="4" fill="#3B2A20"></ellipse><ellipse cx="40" cy="38" rx="3" ry="4" fill="#3B2A20"></ellipse><ellipse cx="17" cy="46" rx="4" ry="2.5" fill="#FF9E8A"></ellipse><ellipse cx="47" cy="46" rx="4" ry="2.5" fill="#FF9E8A"></ellipse><path d="M28 46q4 4 8 0" stroke="#3B2A20" stroke-width="2.5" fill="none" stroke-linecap="round"></path></svg>
+            <span style="font-size: 12px;" class="faint">ふつう</span>
+          </div>
+          <div style="display: flex; flex-direction: column; align-items: center; gap: 6px;">
+            <svg viewBox="0 0 64 64" width="64" height="64" aria-hidden="true"><ellipse cx="25" cy="12" rx="8" ry="4.5" transform="rotate(-30 25 12)" fill="#4CB872"></ellipse><ellipse cx="39" cy="12" rx="8" ry="4.5" transform="rotate(30 39 12)" fill="#4CB872"></ellipse><rect x="31" y="12" width="2.4" height="9" rx="1.2" fill="#2E8A50"></rect><ellipse cx="32" cy="40" rx="24" ry="21" fill="#FFD36B" stroke="#E09A00" stroke-width="2"></ellipse><path d="M20 39q4-5 8 0M36 39q4-5 8 0" stroke="#3B2A20" stroke-width="2.6" fill="none" stroke-linecap="round"></path><ellipse cx="17" cy="46" rx="4" ry="2.5" fill="#FF9E8A"></ellipse><ellipse cx="47" cy="46" rx="4" ry="2.5" fill="#FF9E8A"></ellipse><path d="M27 45q5 7 10 0z" fill="#3B2A20"></path></svg>
+            <span style="font-size: 12px;" class="faint">よろこび</span>
+          </div>
+          <div style="display: flex; flex-direction: column; align-items: center; gap: 6px;">
+            <svg viewBox="0 0 64 64" width="64" height="64" aria-hidden="true"><ellipse cx="25" cy="12" rx="8" ry="4.5" transform="rotate(-30 25 12)" fill="#4CB872"></ellipse><ellipse cx="39" cy="12" rx="8" ry="4.5" transform="rotate(30 39 12)" fill="#4CB872"></ellipse><rect x="31" y="12" width="2.4" height="9" rx="1.2" fill="#2E8A50"></rect><ellipse cx="32" cy="40" rx="24" ry="21" fill="#FFD36B" stroke="#E09A00" stroke-width="2"></ellipse><path d="M20 39h8M36 39h8" stroke="#3B2A20" stroke-width="2.6" fill="none" stroke-linecap="round"></path><ellipse cx="17" cy="46" rx="4" ry="2.5" fill="#FF9E8A"></ellipse><ellipse cx="47" cy="46" rx="4" ry="2.5" fill="#FF9E8A"></ellipse><path d="M29 47h6" stroke="#3B2A20" stroke-width="2.5" stroke-linecap="round"></path></svg>
+            <span style="font-size: 12px;" class="faint">おやすみ</span>
+          </div>
+        </div>
+        <p style="margin: 0; font-size: 14px; line-height: 1.7;" class="muted">相棒ミナ（名前は設定で変更可）。表情は ふつう・よろこび・おやすみ の3つだけ。吹き出しは2行まで。</p>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1320}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

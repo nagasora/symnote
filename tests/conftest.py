@@ -11,6 +11,7 @@ import pytest
 def _isolated_database(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """DB_PATH を既定で一時ファイルに向ける。個別のテストが上書きしてもよい。"""
     monkeypatch.setenv("DB_PATH", str(tmp_path / "isolated.db"))
+    monkeypatch.setenv("SYMNOTE_STORAGE_BACKEND", "sqlite")
 
 
 @pytest.fixture(autouse=True)

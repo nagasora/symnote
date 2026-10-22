@@ -6,9 +6,10 @@ import datetime as dt
 import json
 import logging
 import os
+import secrets
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from pydantic import BaseModel, ValidationError
 from starlette.applications import Starlette
@@ -34,11 +35,13 @@ from symnote.api.auth import (
     e2e_mode_enabled,
     google_oauth_config,
     is_https_request,
+    request_session_token,
     resolve_request_user,
     revoke_session,
     set_session_cookie,
     verify_csrf,
 )
+from symnote.api.mobile_auth import mobile_exchange_endpoint, mobile_start_endpoint, no_store
 from symnote.api.presenters import (
     goal_title_map,
     present_candidate,
@@ -69,7 +72,8 @@ from symnote.api.schemas import (
     UnsortedSortRequest,
 )
 from symnote.core import candidates as candidate_store
-from symnote.core import db, goals, mindmap, usage_limit
+from symnote.core import db, goals, mindmap, postgres, usage_limit
+from symnote.api import game
 from symnote.core.accounts import (
     UserRecord,
     complete_onboarding,
@@ -78,6 +82,11 @@ from symnote.core.accounts import (
     list_users,
     revoke_invite,
     user_scope,
+)
+from symnote.core.mobile_auth import (
+    MOBILE_REDIRECT_URI,
+    create_callback_handoff,
+    get_mobile_flow,
 )
 from symnote.core.overview import task_overview
 from symnote.core.quick_parse import parse_quick_input
@@ -186,6 +195,12 @@ def _with_auth(
 
 
 async def health_endpoint(_request: Request) -> Response:
+    if postgres.enabled():
+        try:
+            with postgres.connection() as conn:
+                conn.execute("SELECT 1")
+        except Exception:
+            return _json({"ok": False, "storage": "unavailable"}, status_code=503)
     return _json({"ok": True})
 
 
@@ -196,7 +211,8 @@ async def auth_me_endpoint(request: Request) -> Response:
             "authenticated": user is not None,
             "mode": auth_mode(),
             "google_enabled": google_oauth_config() is not None,
-            "passcode_enabled": bool(app_passcode()),
+            "mobile_enabled": google_oauth_config() is not None,
+            "passcode_enabled": bool(app_passcode()) and not postgres.enabled(),
             "e2e_enabled": e2e_mode_enabled(),
             "user": _user_dict(user) if user else None,
             "csrf_header": "X-SymNote",
@@ -214,7 +230,7 @@ async def auth_login_endpoint(request: Request) -> Response:
         token = create_session(user.id)
         resp = _json({"authenticated": True, "user": _user_dict(user)})
         set_session_cookie(resp, request, token)
-        return resp
+        return no_store(resp)
     except PermissionError as exc:
         return _error(str(exc), status_code=401, code="invalid_credentials")
     except ValueError as exc:
@@ -236,7 +252,7 @@ async def auth_e2e_login_endpoint(request: Request) -> Response:
         token = create_session(user.id)
         resp = _json({"authenticated": True, "user": _user_dict(user)})
         set_session_cookie(resp, request, token)
-        return resp
+        return no_store(resp)
     except InviteRequiredError as exc:
         return _error(str(exc), status_code=403, code="not_invited")
     except PermissionError as exc:
@@ -249,12 +265,12 @@ async def auth_logout_endpoint(request: Request) -> Response:
     csrf_err = verify_csrf(request)
     if csrf_err:
         return _error(csrf_err, status_code=403, code="csrf_failed")
-    token = request.cookies.get("symnote_session", "")
+    token = request_session_token(request)
     if token:
         revoke_session(token)
     resp = _json({"ok": True})
     clear_session_cookie(resp)
-    return resp
+    return no_store(resp)
 
 
 async def auth_google_start_endpoint(request: Request) -> Response:
@@ -270,29 +286,76 @@ async def auth_google_start_endpoint(request: Request) -> Response:
             samesite="lax",
             path="/api/auth/google",
         )
-        return apply_security_headers(resp)
+        return no_store(resp)
     except Exception as exc:
-        return _error(str(exc), status_code=400, code="oauth_unavailable")
+        logger.warning("Google login start failed: type=%s", type(exc).__name__)
+        return _error("Googleログインを開始できません。時間をおいて再試行してください。", status_code=503, code="oauth_unavailable")
 
 
 async def auth_google_callback_endpoint(request: Request) -> Response:
     state = request.query_params.get("state", "").strip()
     code = request.query_params.get("code", "").strip()
     err = request.query_params.get("error", "").strip()
+    browser_state = request.cookies.get(OAUTH_STATE_COOKIE_NAME, "")
+    try:
+        mobile_flow = get_mobile_flow(state) if state else None
+    except Exception as exc:
+        logger.warning("Mobile callback lookup failed: type=%s", type(exc).__name__)
+        return no_store(RedirectResponse("/?auth_error=failed", status_code=302))
+
+    def native_error(error: str) -> Response | None:
+        if (
+            mobile_flow is None
+            or not browser_state
+            or not secrets.compare_digest(browser_state, state)
+        ):
+            return None
+        params = {"error": error, "app_state": mobile_flow.app_state}
+        response = RedirectResponse(
+            f"{MOBILE_REDIRECT_URI}?{urlencode(params)}", status_code=302
+        )
+        response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/api/auth/google")
+        return no_store(response)
+
     if err:
+        mobile_response = native_error("cancelled")
+        if mobile_response is not None:
+            return mobile_response
         return apply_security_headers(RedirectResponse("/?auth_error=cancelled", status_code=302))
     if not state or not code:
-        return apply_security_headers(RedirectResponse("/?auth_error=invalid_callback", status_code=302))
-    try:
-        user = complete_google_callback(
-            state, code, request.cookies.get(OAUTH_STATE_COOKIE_NAME, "")
+        mobile_response = native_error("failed")
+        if mobile_response is not None:
+            return mobile_response
+        return apply_security_headers(
+            RedirectResponse("/?auth_error=invalid_callback", status_code=302)
         )
+    try:
+        user = complete_google_callback(state, code, browser_state)
+        if mobile_flow is not None:
+            handoff = create_callback_handoff(state, user.id)
+            if handoff is None:
+                params = {"error": "failed", "app_state": mobile_flow.app_state}
+                response = RedirectResponse(
+                    f"{MOBILE_REDIRECT_URI}?{urlencode(params)}",
+                    status_code=302,
+                )
+            else:
+                params = {"code": handoff.code, "app_state": handoff.app_state}
+                response = RedirectResponse(
+                    f"{MOBILE_REDIRECT_URI}?{urlencode(params)}",
+                    status_code=302,
+                )
+            response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/api/auth/google")
+            return no_store(response)
         token = create_session(user.id)
         resp = RedirectResponse("/", status_code=302)
         set_session_cookie(resp, request, token)
         resp.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/api/auth/google")
-        return apply_security_headers(resp)
+        return no_store(resp)
     except InviteRequiredError:
+        mobile_response = native_error("not_invited")
+        if mobile_response is not None:
+            return mobile_response
         return apply_security_headers(RedirectResponse("/?auth_error=not_invited", status_code=302))
     except Exception as exc:
         logger.warning(
@@ -301,6 +364,9 @@ async def auth_google_callback_endpoint(request: Request) -> Response:
             getattr(exc, "code", None),
             type(getattr(exc, "reason", None)).__name__,
         )
+        mobile_response = native_error("failed")
+        if mobile_response is not None:
+            return mobile_response
         return apply_security_headers(RedirectResponse("/?auth_error=failed", status_code=302))
 
 
@@ -368,26 +434,7 @@ def today_get_handler(request: Request, user: UserRecord) -> Any:
 
     next_action = pick_next_action(overdue_rows + due_today_rows, today=target_date)
 
-    calendar_events: List[Dict[str, Any]] = []
-    if user.is_owner:
-        try:
-            from symnote.core.calendar_events import list_events_for_date
-
-            res = list_events_for_date(target_date)
-            if res.ok:
-                for ev in res.events:
-                    calendar_events.append(
-                        {
-                            "id": ev.event_id,
-                            "summary": ev.summary,
-                            "start": ev.start_label,
-                            "end": ev.end_label,
-                            "is_all_day": ev.all_day,
-                            "html_link": ev.html_link,
-                        }
-                    )
-        except Exception:
-            pass
+    calendar_events, free_minutes = game.calendar_payload(user, target_date)
 
     pending_candidates = candidate_store.count_pending_candidates()
     unsorted_cnt = db.count_unsorted()
@@ -404,6 +451,7 @@ def today_get_handler(request: Request, user: UserRecord) -> Any:
         "pending_candidates_count": pending_candidates,
         "unsorted_count": unsorted_cnt,
         "inbox_badge_count": pending_candidates + unsorted_cnt,
+        **game.today_extras({"overdue": overdue_items, "due_today": due_today_items}, target_date, free_minutes=free_minutes),
     }
 
 
@@ -427,6 +475,7 @@ def today_plan_handler(_request: Request, _user: UserRecord) -> Any:
     return {
         "next_action": pick,
         "recommended_task_ids": top_ids,
+        "tasks": present_tasks([row for row in all_active if int(row["id"]) in top_ids]),
     }
 
 
@@ -567,22 +616,25 @@ async def task_patch_handler(request: Request, user: UserRecord) -> Any:
     if "estimate_minutes" in fields_set:
         updates["estimate_minutes"] = body.estimate_minutes
 
+    if body.stop_recurrence:
+        updates["recurrence_settings"] = (None, None)
+    elif "recurrence" in fields_set and body.recurrence is not None:
+        from symnote.core.recurrence import RecurrenceRule
+
+        rec = body.recurrence
+        due = updates.get("due_date") or existing.get("due_date") or dt.date.today().isoformat()
+        rule = RecurrenceRule(
+            rec.frequency,
+            rec.interval * 7 if rec.frequency == "weekly" else rec.interval,
+            tuple(rec.weekdays),
+            (rec.month_day or dt.date.fromisoformat(due).day) if rec.frequency == "monthly" else None,
+        )
+        updates["recurrence_settings"] = (rule, rec.end_date)
+
+    if body.goal_id is not None and "goal_id" in fields_set:
+        goals.get_goal_context(body.goal_id)
     if updates:
         db.update_item_fields(task_id, **updates)
-
-    if body.stop_recurrence:
-        db.stop_task_recurrence(task_id)
-    elif "recurrence" in fields_set and body.recurrence is not None:
-        rec = body.recurrence
-        interval_days = _interval_days_from_spec(rec.frequency, rec.interval)
-        db.set_task_recurrence(
-            task_id,
-            interval_days,
-            frequency=rec.frequency,
-            weekdays=",".join(str(d) for d in rec.weekdays) if rec.weekdays else None,
-            month_day=rec.month_day,
-            end_date=rec.end_date,
-        )
 
     _calendar_sync_for_owner(user, "upsert", task_id)
     updated_row = db.fetch_item(task_id)
@@ -616,6 +668,9 @@ def task_complete_handler(request: Request, user: UserRecord) -> Any:
     return {
         "task": presented[0] if presented else None,
         "next_task": presented[1] if len(presented) > 1 else None,
+        "reward": game.reward_payload(task_id),
+        "daily_clear": game.jsonable(game.quest.award_daily_clear_if_eligible(dt.date.today())),
+        "player": game.player_payload(),
     }
 
 
@@ -808,37 +863,59 @@ async def capture_create_handler(request: Request, user: UserRecord) -> Any:
 async def capture_split_handler(request: Request, _user: UserRecord) -> Any:
     body: BrainDumpSplitRequest = await _parse_body(request, BrainDumpSplitRequest)
     items, used_ai = split_brain_dump(body.text)
+    for item in items:
+        title = item["title"]
+        parsed = parse_quick_input(title)
+        is_seed = title.startswith(("たね:", "たね：", "アイデア:", "アイデア：")) or title.endswith(("したい", "作りたい"))
+        item["kind"] = item.get("kind") or ("seed" if is_seed else "memo" if parsed.kind == "memo" else "task")
     return {"items": items, "ai_used": used_ai}
 
 
 async def capture_commit_split_handler(request: Request, user: UserRecord) -> Any:
     body: BrainDumpCommitRequest = await _parse_body(request, BrainDumpCommitRequest)
     created_ids: List[int] = []
+    memo_ids: List[int] = []
+    seed_ids: List[int] = []
     memo_id: Optional[int] = None
-    if body.save_source_memo and body.source_text.strip():
-        memo_id = db.insert_memo(raw_text=body.source_text.strip(), tags="ブレインダンプ")
-    for draft in body.items:
-        clean_title = " ".join(draft.title.split())
-        if not clean_title:
-            continue
-        raw_text = _compose_task_raw_text(clean_title, draft.details)
-        norm_due = candidate_store.normalize_due_date(draft.due_date)
-        norm_time = candidate_store.normalize_due_time(draft.due_time)
-        tid = db.insert_task(
-            raw_text=raw_text,
-            tags=clean_title,
-            due_date=norm_due,
-            due_time=norm_time,
-            status=draft.status,
-            importance=draft.importance,
-            urgency=draft.urgency,
-            goal_id=draft.goal_id,
-            estimate_minutes=draft.estimate_minutes,
-        )
-        created_ids.append(tid)
-        _calendar_sync_for_owner(user, "upsert", tid)
+    with db.connection() as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if body.save_source_memo and body.source_text.strip():
+            memo_id = db.insert_item_in_transaction(conn, kind="memo", raw_text=body.source_text.strip(), tags="ミナに渡したメモ")
+        for draft in body.items:
+            clean_title = " ".join(draft.title.split())
+            if not clean_title:
+                raise ValueError("空の項目は登録できません。")
+            if draft.kind == "seed" and draft.goal_id is not None:
+                raise ValueError("たねは育てる前にマップへ割り当てられません。")
+            if draft.goal_id is not None and not conn.execute("SELECT 1 FROM goals WHERE id=?", (draft.goal_id,)).fetchone():
+                raise LookupError("割り当て先のマップが見つかりません。")
+            raw_text = _compose_task_raw_text(clean_title, draft.details)
+            item_id = db.insert_item_in_transaction(
+                conn,
+                kind="task" if draft.kind == "task" else "memo",
+                raw_text=raw_text,
+                tags=clean_title,
+                due_date=candidate_store.normalize_due_date(draft.due_date) if draft.kind == "task" else None,
+                due_time=candidate_store.normalize_due_time(draft.due_time) if draft.kind == "task" else None,
+                status=draft.status,
+                ai_category="idea" if draft.kind == "seed" else None,
+                importance=draft.importance,
+                urgency=draft.urgency,
+                goal_id=draft.goal_id,
+                estimate_minutes=draft.estimate_minutes if draft.kind == "task" else None,
+            )
+            if draft.kind == "task":
+                created_ids.append(item_id)
+            elif draft.kind == "seed":
+                seed_ids.append(item_id)
+            else:
+                memo_ids.append(item_id)
+    for task_id in created_ids:
+        _calendar_sync_for_owner(user, "upsert", task_id)
     rows = [r for r in (db.fetch_item(tid) for tid in created_ids) if r is not None]
-    return {"tasks": present_tasks(rows), "memo_id": memo_id}
+    return {"tasks": present_tasks(rows), "memo_id": memo_id,
+            "memos": [present_memo(db.fetch_item(mid)) for mid in memo_ids],
+            "seeds": [present_memo(db.fetch_item(sid)) for sid in seed_ids]}
 
 
 # --- Inbox (AI Candidates & Unsorted) ---
@@ -888,6 +965,7 @@ async def candidate_approve_handler(request: Request, user: UserRecord) -> Any:
     return {
         "candidate": present_candidate(cand_row) if cand_row else None,
         "task": present_tasks([task_row])[0] if task_row else None,
+        "triage_bonus": game.jsonable(game.quest.award_triage(f"candidate:{candidate_id}")),
     }
 
 
@@ -903,7 +981,8 @@ def candidate_reject_handler(request: Request, _user: UserRecord) -> Any:
             ) from exc
         raise
     cand_row = candidate_store.get_candidate(candidate_id)
-    return {"candidate": present_candidate(cand_row) if cand_row else None}
+    return {"candidate": present_candidate(cand_row) if cand_row else None,
+            "triage_bonus": game.jsonable(game.quest.award_triage(f"candidate:{candidate_id}"))}
 
 
 def candidate_restore_handler(request: Request, _user: UserRecord) -> Any:
@@ -937,8 +1016,10 @@ async def unsorted_sort_handler(request: Request, user: UserRecord) -> Any:
     row = db.fetch_item(item_id)
     assert row is not None
     if body.as_kind == "task":
-        return {"kind": "task", "task": present_tasks([row])[0]}
-    return {"kind": "memo", "memo": present_memo(row)}
+        return {"kind": "task", "task": present_tasks([row])[0],
+                "triage_bonus": game.jsonable(game.quest.award_triage(f"unsorted:{item_id}"))}
+    return {"kind": "memo", "memo": present_memo(row),
+            "triage_bonus": game.jsonable(game.quest.award_triage(f"unsorted:{item_id}"))}
 
 
 def unsorted_delete_handler(request: Request, _user: UserRecord) -> Any:
@@ -1167,6 +1248,21 @@ async def ideas_node_to_task_handler(request: Request, user: UserRecord) -> Any:
 # --- Settings & Export ---
 
 
+def trash_list_handler(_request: Request, _user: UserRecord) -> Any:
+    return {"items": [
+        {key: row[key] for key in ("id", "kind", "title", "deleted_at")}
+        for row in db.list_trashed_items()
+    ]}
+
+
+def trash_restore_handler(request: Request, user: UserRecord) -> Any:
+    item_id = db.restore_trashed_item(int(request.path_params["trash_id"]))
+    item = db.fetch_item(item_id)
+    if item and item["kind"] == "task":
+        _calendar_sync_for_owner(user, "upsert", item_id)
+    return {"ok": True, "restored_id": item_id}
+
+
 def settings_get_handler(_request: Request, user: UserRecord) -> Any:
     snap = usage_limit.usage_snapshot()
     cal_connected = False
@@ -1302,12 +1398,16 @@ def create_app(*, static_dir: Optional[Path] = None) -> Starlette:
 
     routes = [
         Route("/api/health", health_endpoint, methods=["GET"]),
+        Route("/api/trash", _with_auth(trash_list_handler), methods=["GET"]),
+        Route("/api/trash/{trash_id:int}/restore", _with_auth(trash_restore_handler), methods=["POST"]),
         Route("/api/auth/me", auth_me_endpoint, methods=["GET"]),
         Route("/api/auth/login", auth_login_endpoint, methods=["POST"]),
         Route("/api/auth/e2e-login", auth_e2e_login_endpoint, methods=["POST"]),
         Route("/api/auth/logout", auth_logout_endpoint, methods=["POST"]),
         Route("/api/auth/google/start", auth_google_start_endpoint, methods=["GET"]),
         Route("/api/auth/google/callback", auth_google_callback_endpoint, methods=["GET"]),
+        Route("/api/auth/mobile/start", mobile_start_endpoint, methods=["GET"]),
+        Route("/api/auth/mobile/exchange", mobile_exchange_endpoint, methods=["POST"]),
         Route("/api/auth/onboarding", _with_auth(auth_onboarding_handler), methods=["POST"]),
         Route("/api/today", _with_auth(today_get_handler), methods=["GET"]),
         Route("/api/today/plan", _with_auth(today_plan_handler), methods=["POST"]),
@@ -1355,6 +1455,7 @@ def create_app(*, static_dir: Optional[Path] = None) -> Starlette:
             methods=["DELETE"],
         ),
         Route("/api/export", _with_auth(export_get_handler), methods=["GET"]),
+        *game.routes(_with_auth),
         Route("/{full_path:path}", spa_fallback, methods=["GET"]),
     ]
 

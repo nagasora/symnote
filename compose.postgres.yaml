@@ -1,0 +1,35 @@
+services:
+  symnote-web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - ${SYMNOTE_ENV_FILE:-./src/symnote/.env}
+    environment:
+      SYMNOTE_STORAGE_BACKEND: postgres
+      DATABASE_URL: postgresql://symnote@postgres:5432/symnote
+      PGPASSWORD: ${SYMNOTE_POSTGRES_PASSWORD:?Set a dedicated local PostgreSQL password}
+      SYMNOTE_E2E: "0"
+      SYMNOTE_ALLOW_NO_PASSCODE: "0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: symnote
+      POSTGRES_DB: symnote
+      POSTGRES_PASSWORD: ${SYMNOTE_POSTGRES_PASSWORD:?Set a dedicated local PostgreSQL password}
+    volumes:
+      - symnote_postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U symnote -d symnote"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+volumes:
+  symnote_postgres:

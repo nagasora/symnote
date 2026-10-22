@@ -112,16 +112,162 @@ def test_recurring_tasks_award_each_occurrence() -> None:
         assert {row[0] for row in conn.execute("SELECT task_id FROM quest_log")} == {task_id, next_id}
 
 
-@pytest.mark.parametrize("offsets,expected", [([], 0), ([0], 1), ([1, 2, 3], 3), ([0, 1, 2], 3),
-                                                            ([2, 3], 0), ([0, 2], 1), ([0, 0, 1], 2)])
-def test_streak_including_yesterday(offsets: List[int], expected: int) -> None:
-    """今日未完了の継続は維持し、一昨日以前で止まった継続は0日になる。"""
+@pytest.mark.parametrize(
+    "offsets,expected,rest_used",
+    [
+        ([], 0, 0),
+        ([0], 1, 0),
+        ([1, 2, 3], 3, 0),
+        ([0, 1, 2], 3, 0),
+        ([2, 3], 3, 1),
+        ([0, 2], 3, 1),
+        ([0, 0, 1], 2, 0),
+        ([1, 3], 3, 1),
+        ([0, 1, 3], 4, 1),
+        ([0, 3, 4], 1, 1),
+        ([0, 1, 3, 5], 2, 1),
+        ([0, 1, 3, 4, 5, 7], 8, 1),
+    ],
+)
+def test_streak_including_weekly_rest(
+    offsets: List[int], expected: int, rest_used: int
+) -> None:
+    """An isolated blank is covered once per ISO week; two blanks still stop it."""
     today = date(2026, 10, 16)
     for task_id, offset in enumerate(offsets, 1):
         _award(task_id, f"{today - timedelta(days=offset)}T12:00:00")
     stats = quest.get_player_stats(today)
     assert stats.streak_days == expected
     assert stats.completed_today == offsets.count(0)
+    assert quest.streak_info(today) == quest.StreakInfo(expected, rest_used)
+
+
+def test_quest_preview_is_read_only_and_uses_effort_rules() -> None:
+    """Preview matches completion rewards and maps minutes/effort to one to three stars."""
+    now = datetime(2026, 10, 16, 12)
+    short = quest.quest_preview({"importance": 5, "estimate_minutes": 15}, now)
+    medium = quest.quest_preview({"effort": "medium"}, now)
+    boss = quest.quest_preview({"estimate_minutes": 61, "due_date": "2026-10-16"}, now)
+    assert short == quest.QuestPreview(21, 11, 1, False)
+    assert medium == quest.QuestPreview(15, 8, 2, False)
+    assert boss == quest.QuestPreview(29, 15, 3, True)
+    with db.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM quest_log").fetchone()[0] == 0
+
+
+def test_reward_lookup_and_seen_claim_are_separate_and_atomic() -> None:
+    """Reading leaves unseen intact and exactly one caller can claim the animation."""
+    reward = _award(7, tags="Visible title", raw_text="Body\nMore")
+    assert reward is not None and reward.title == "Visible title"
+    assert quest.reward_for_task(7) == reward
+    assert quest.reward_for_task(999) is None
+    with db.connection() as conn:
+        assert conn.execute("SELECT seen FROM quest_log WHERE task_id = 7").fetchone()[0] == 0
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        assert sum(executor.map(lambda _: quest.mark_reward_seen(7), range(2))) == 1
+    assert quest.reward_for_task(7) == reward
+
+
+def test_daily_clear_is_eligible_once_and_updates_player_totals() -> None:
+    """The final due/today task grants one chest whose XP and gold join totals."""
+    today = date.today()
+    task_id = db.insert_item(
+        kind="task", raw_text="Last quest", status="today", due_date=today.isoformat()
+    )
+    assert quest.award_daily_clear_if_eligible(today) is None
+    db.complete_task(task_id)
+    bonus = quest.award_daily_clear_if_eligible(today)
+    assert bonus is not None
+    assert (bonus.kind, bonus.ref, bonus.xp, bonus.gold) == (
+        "daily_clear", today.isoformat(), 20, 10
+    )
+    assert quest.award_daily_clear_if_eligible(today) is None
+    stats = quest.get_player_stats(today)
+    assert (stats.xp_total, stats.gold) == (33, 17)
+
+
+def test_daily_clear_requires_no_overdue_or_today_tasks() -> None:
+    """A clear today does not open the chest while another eligible task remains."""
+    today = date.today()
+    _award(1, f"{today.isoformat()}T12:00:00")
+    db.insert_item(
+        kind="task",
+        raw_text="Still waiting",
+        status="inbox",
+        due_date=(today - timedelta(days=1)).isoformat(),
+    )
+    assert quest.award_daily_clear_if_eligible(today) is None
+
+
+def test_concurrent_daily_clear_is_awarded_once() -> None:
+    """Concurrent final-clear checks cannot duplicate the chest."""
+    today = date.today()
+    _award(1, f"{today.isoformat()}T12:00:00")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        bonuses = list(executor.map(lambda _: quest.award_daily_clear_if_eligible(today), range(2)))
+    assert sum(bonus is not None for bonus in bonuses) == 1
+
+
+def test_triage_is_idempotent_and_capped_at_twenty_per_day() -> None:
+    """Only twenty unique board decisions earn XP on one day."""
+    now = datetime(2026, 10, 16, 12)
+    assert quest.award_triage("candidate:1", now=now) is not None
+    assert quest.award_triage("candidate:1", now=now) is None
+    for item_id in range(2, 21):
+        assert quest.award_triage(f"candidate:{item_id}", now=now) is not None
+    assert quest.award_triage("candidate:21", now=now) is None
+    stats = quest.get_player_stats(now.date())
+    assert (stats.xp_total, stats.gold) == (40, 0)
+
+
+def test_concurrent_triage_respects_daily_cap() -> None:
+    """The read-count-insert sequence is serialized under concurrent decisions."""
+    now = datetime(2026, 10, 16, 12)
+    with ThreadPoolExecutor(max_workers=25) as executor:
+        bonuses = list(
+            executor.map(
+                lambda item_id: quest.award_triage(f"report:{item_id}", now=now),
+                range(25),
+            )
+        )
+    assert sum(bonus is not None for bonus in bonuses) == 20
+
+
+def test_quest_history_includes_zero_days_and_inferred_rest() -> None:
+    """Footprints expose every requested date plus the isolated covered blank."""
+    today = date(2026, 10, 16)
+    _award(1, "2026-10-16T12:00:00")
+    _award(2, "2026-10-14T12:00:00")
+    history = quest.quest_history(4, today=today)
+    assert history == [
+        {"day": "2026-10-13", "count": 0, "rest_day": False},
+        {"day": "2026-10-14", "count": 1, "rest_day": False},
+        {"day": "2026-10-15", "count": 0, "rest_day": True},
+        {"day": "2026-10-16", "count": 1, "rest_day": False},
+    ]
+
+
+def test_quest_history_keeps_first_weekly_rest_reserved_as_time_advances() -> None:
+    """Later completions and later history windows cannot relocate a week's coupon."""
+    _award(1, "2026-10-12T12:00:00")
+    _award(2, "2026-10-14T12:00:00")
+    _award(3, "2026-10-16T12:00:00")
+
+    on_wednesday = {
+        row["day"]: row for row in quest.quest_history(3, today=date(2026, 10, 14))
+    }
+    on_friday = {
+        row["day"]: row for row in quest.quest_history(5, today=date(2026, 10, 16))
+    }
+    on_tuesday = {
+        row["day"]: row for row in quest.quest_history(9, today=date(2026, 10, 20))
+    }
+
+    assert on_wednesday["2026-10-13"]["rest_day"] is True
+    assert on_friday["2026-10-13"]["rest_day"] is True
+    assert on_friday["2026-10-15"]["rest_day"] is False
+    assert on_tuesday["2026-10-13"]["rest_day"] is True
+    assert on_tuesday["2026-10-15"]["rest_day"] is False
 
 
 @pytest.mark.parametrize("xp,expected", [(0, (1, 0, 50)), (49, (1, 49, 50)),

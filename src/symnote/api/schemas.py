@@ -104,6 +104,7 @@ class BrainDumpSplitRequest(BaseModel):
 
 
 class BrainDumpTaskDraft(BaseModel):
+    kind: Literal["task", "seed", "memo"] = "task"
     title: str = Field(min_length=1, max_length=200)
     details: str = Field(default="", max_length=2000)
     due_date: Optional[str] = None

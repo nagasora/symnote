@@ -1,10 +1,14 @@
-# Project-scoped Codex settings for SymNote.
-# Keep agents shallow and bounded because all workers share this local checkout.
-model = "gpt-5.6-terra"
-model_reasoning_effort = "medium"
+# Company-level Codex defaults for the primary CEO/manager thread.
+# Ultra is selected in the Codex app; it is an orchestration mode, not a
+# model_reasoning_effort value. xhigh keeps the Sol manager at the highest
+# durable reasoning level supported by project config.
+model = "gpt-6.1-sol"
+model_reasoning_effort = "mid"
+
+[features]
+multi_agent = true
 
 [agents]
-max_threads = 4
-max_depth = 1
-job_max_runtime_seconds = 1800
-interrupt_message = true
+
+enabled = true
+max_concurrent_threads_per_session = 3
