@@ -6,9 +6,10 @@ import datetime as dt
 import json
 import logging
 import os
+import secrets
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 from pydantic import BaseModel, ValidationError
 from starlette.applications import Starlette
@@ -34,11 +35,13 @@ from symnote.api.auth import (
     e2e_mode_enabled,
     google_oauth_config,
     is_https_request,
+    request_session_token,
     resolve_request_user,
     revoke_session,
     set_session_cookie,
     verify_csrf,
 )
+from symnote.api.mobile_auth import mobile_exchange_endpoint, mobile_start_endpoint, no_store
 from symnote.api.presenters import (
     goal_title_map,
     present_candidate,
@@ -69,7 +72,7 @@ from symnote.api.schemas import (
     UnsortedSortRequest,
 )
 from symnote.core import candidates as candidate_store
-from symnote.core import db, goals, mindmap, usage_limit, postgres
+from symnote.core import db, goals, mindmap, postgres, usage_limit
 from symnote.core.accounts import (
     UserRecord,
     complete_onboarding,
@@ -78,6 +81,11 @@ from symnote.core.accounts import (
     list_users,
     revoke_invite,
     user_scope,
+)
+from symnote.core.mobile_auth import (
+    MOBILE_REDIRECT_URI,
+    create_callback_handoff,
+    get_mobile_flow,
 )
 from symnote.core.overview import task_overview
 from symnote.core.quick_parse import parse_quick_input
@@ -202,6 +210,7 @@ async def auth_me_endpoint(request: Request) -> Response:
             "authenticated": user is not None,
             "mode": auth_mode(),
             "google_enabled": google_oauth_config() is not None,
+            "mobile_enabled": google_oauth_config() is not None,
             "passcode_enabled": bool(app_passcode()) and not postgres.enabled(),
             "e2e_enabled": e2e_mode_enabled(),
             "user": _user_dict(user) if user else None,
@@ -220,7 +229,7 @@ async def auth_login_endpoint(request: Request) -> Response:
         token = create_session(user.id)
         resp = _json({"authenticated": True, "user": _user_dict(user)})
         set_session_cookie(resp, request, token)
-        return resp
+        return no_store(resp)
     except PermissionError as exc:
         return _error(str(exc), status_code=401, code="invalid_credentials")
     except ValueError as exc:
@@ -242,7 +251,7 @@ async def auth_e2e_login_endpoint(request: Request) -> Response:
         token = create_session(user.id)
         resp = _json({"authenticated": True, "user": _user_dict(user)})
         set_session_cookie(resp, request, token)
-        return resp
+        return no_store(resp)
     except InviteRequiredError as exc:
         return _error(str(exc), status_code=403, code="not_invited")
     except PermissionError as exc:
@@ -255,12 +264,12 @@ async def auth_logout_endpoint(request: Request) -> Response:
     csrf_err = verify_csrf(request)
     if csrf_err:
         return _error(csrf_err, status_code=403, code="csrf_failed")
-    token = request.cookies.get("symnote_session", "")
+    token = request_session_token(request)
     if token:
         revoke_session(token)
     resp = _json({"ok": True})
     clear_session_cookie(resp)
-    return resp
+    return no_store(resp)
 
 
 async def auth_google_start_endpoint(request: Request) -> Response:
@@ -276,7 +285,7 @@ async def auth_google_start_endpoint(request: Request) -> Response:
             samesite="lax",
             path="/api/auth/google",
         )
-        return apply_security_headers(resp)
+        return no_store(resp)
     except Exception as exc:
         logger.warning("Google login start failed: type=%s", type(exc).__name__)
         return _error("Googleログインを開始できません。時間をおいて再試行してください。", status_code=503, code="oauth_unavailable")
@@ -286,20 +295,66 @@ async def auth_google_callback_endpoint(request: Request) -> Response:
     state = request.query_params.get("state", "").strip()
     code = request.query_params.get("code", "").strip()
     err = request.query_params.get("error", "").strip()
+    browser_state = request.cookies.get(OAUTH_STATE_COOKIE_NAME, "")
+    try:
+        mobile_flow = get_mobile_flow(state) if state else None
+    except Exception as exc:
+        logger.warning("Mobile callback lookup failed: type=%s", type(exc).__name__)
+        return no_store(RedirectResponse("/?auth_error=failed", status_code=302))
+
+    def native_error(error: str) -> Response | None:
+        if (
+            mobile_flow is None
+            or not browser_state
+            or not secrets.compare_digest(browser_state, state)
+        ):
+            return None
+        params = {"error": error, "app_state": mobile_flow.app_state}
+        response = RedirectResponse(
+            f"{MOBILE_REDIRECT_URI}?{urlencode(params)}", status_code=302
+        )
+        response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/api/auth/google")
+        return no_store(response)
+
     if err:
+        mobile_response = native_error("cancelled")
+        if mobile_response is not None:
+            return mobile_response
         return apply_security_headers(RedirectResponse("/?auth_error=cancelled", status_code=302))
     if not state or not code:
-        return apply_security_headers(RedirectResponse("/?auth_error=invalid_callback", status_code=302))
-    try:
-        user = complete_google_callback(
-            state, code, request.cookies.get(OAUTH_STATE_COOKIE_NAME, "")
+        mobile_response = native_error("failed")
+        if mobile_response is not None:
+            return mobile_response
+        return apply_security_headers(
+            RedirectResponse("/?auth_error=invalid_callback", status_code=302)
         )
+    try:
+        user = complete_google_callback(state, code, browser_state)
+        if mobile_flow is not None:
+            handoff = create_callback_handoff(state, user.id)
+            if handoff is None:
+                params = {"error": "failed", "app_state": mobile_flow.app_state}
+                response = RedirectResponse(
+                    f"{MOBILE_REDIRECT_URI}?{urlencode(params)}",
+                    status_code=302,
+                )
+            else:
+                params = {"code": handoff.code, "app_state": handoff.app_state}
+                response = RedirectResponse(
+                    f"{MOBILE_REDIRECT_URI}?{urlencode(params)}",
+                    status_code=302,
+                )
+            response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/api/auth/google")
+            return no_store(response)
         token = create_session(user.id)
         resp = RedirectResponse("/", status_code=302)
         set_session_cookie(resp, request, token)
         resp.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/api/auth/google")
-        return apply_security_headers(resp)
+        return no_store(resp)
     except InviteRequiredError:
+        mobile_response = native_error("not_invited")
+        if mobile_response is not None:
+            return mobile_response
         return apply_security_headers(RedirectResponse("/?auth_error=not_invited", status_code=302))
     except Exception as exc:
         logger.warning(
@@ -308,6 +363,9 @@ async def auth_google_callback_endpoint(request: Request) -> Response:
             getattr(exc, "code", None),
             type(getattr(exc, "reason", None)).__name__,
         )
+        mobile_response = native_error("failed")
+        if mobile_response is not None:
+            return mobile_response
         return apply_security_headers(RedirectResponse("/?auth_error=failed", status_code=302))
 
 
@@ -1315,6 +1373,8 @@ def create_app(*, static_dir: Optional[Path] = None) -> Starlette:
         Route("/api/auth/logout", auth_logout_endpoint, methods=["POST"]),
         Route("/api/auth/google/start", auth_google_start_endpoint, methods=["GET"]),
         Route("/api/auth/google/callback", auth_google_callback_endpoint, methods=["GET"]),
+        Route("/api/auth/mobile/start", mobile_start_endpoint, methods=["GET"]),
+        Route("/api/auth/mobile/exchange", mobile_exchange_endpoint, methods=["POST"]),
         Route("/api/auth/onboarding", _with_auth(auth_onboarding_handler), methods=["POST"]),
         Route("/api/today", _with_auth(today_get_handler), methods=["GET"]),
         Route("/api/today/plan", _with_auth(today_plan_handler), methods=["POST"]),

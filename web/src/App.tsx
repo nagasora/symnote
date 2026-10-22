@@ -12,6 +12,8 @@ import {
   UnsortedItem,
 } from "./api";
 import { GoalsView } from "./GoalsView";
+import { isNativeApp, nativeSignIn, nativeSignOut } from "./nativeClient";
+import { Share } from "@capacitor/share";
 
 type ScreenId = "today" | "inbox" | "all" | "ideas" | "settings";
 
@@ -35,6 +37,10 @@ export function App(): React.ReactElement {
     return saved === "dark" ? "dark" : "light";
   });
   const [auth, setAuth] = useState<AuthState | null>(null);
+  const [authLoadError, setAuthLoadError] = useState("");
+  const [authReload, setAuthReload] = useState(0);
+  const [nativeLoginPending, setNativeLoginPending] = useState(false);
+  const [nativeLogoutPending, setNativeLogoutPending] = useState(false);
   const [screen, setScreen] = useState<ScreenId>("today");
   const [todayData, setTodayData] = useState<TodayPayload | null>(null);
   const [inboxData, setInboxData] = useState<{
@@ -185,6 +191,7 @@ export function App(): React.ReactElement {
   }, []);
 
   useEffect(() => {
+    setAuthLoadError("");
     apiFetch<AuthState>("/api/auth/me")
       .then((a) => {
         setAuth(a);
@@ -193,8 +200,8 @@ export function App(): React.ReactElement {
           refreshAllData().catch(console.error);
         }
       })
-      .catch(console.error);
-  }, [refreshAllData]);
+      .catch(() => setAuthLoadError("サーバーに接続できませんでした。通信状況を確認してください。"));
+  }, [refreshAllData, authReload]);
 
   useEffect(() => {
     if (!auth?.authenticated) return;
@@ -459,7 +466,8 @@ export function App(): React.ReactElement {
           <div className="brand-mark" style={{ margin: "0 auto 12px" }}>
             S
           </div>
-          <p style={{ margin: 0, color: "var(--ink-2)" }}>ノートを開いています…</p>
+          <p role="status" style={{ margin: 0, color: "var(--ink-2)" }}>{authLoadError || "ノートを開いています…"}</p>
+          {authLoadError && <button className="btn" style={{ marginTop: 16 }} onClick={() => setAuthReload((value) => value + 1)}>もう一度接続する</button>}
         </div>
       </div>
     );
@@ -500,7 +508,19 @@ export function App(): React.ReactElement {
             </div>
           )}
 
-          {auth.google_enabled && (
+          {auth.google_enabled && isNativeApp() && auth.mobile_enabled && (
+            <button className="btn primary" disabled={nativeLoginPending} style={{ width: "100%", minHeight: 44, marginBottom: 12 }} onClick={async () => {
+              setLoginError("");
+              setNativeLoginPending(true);
+              try { await nativeSignIn(); }
+              catch { setLoginError("ログインを完了できませんでした。もう一度お試しください。"); }
+              finally { setNativeLoginPending(false); }
+            }}>{nativeLoginPending ? "ログインを確認中…" : "Google アカウントでログイン"}</button>
+          )}
+          {auth.google_enabled && isNativeApp() && !auth.mobile_enabled && (
+            <p role="status">このサーバーではアプリからのログインをまだ利用できません。更新後にもう一度お試しください。</p>
+          )}
+          {auth.google_enabled && !isNativeApp() && (
             <a
               href="/api/auth/google/start"
               className="btn primary"
@@ -1749,7 +1769,15 @@ export function App(): React.ReactElement {
                     <button
                       type="button"
                       className="btn ghost"
+                      disabled={nativeLogoutPending}
                       onClick={async () => {
+                        if (isNativeApp()) {
+                          setNativeLogoutPending(true);
+                          try { await nativeSignOut(); }
+                          catch { showToast("ログアウトを完了できませんでした。もう一度お試しください。"); }
+                          finally { setNativeLogoutPending(false); }
+                          return;
+                        }
                         await apiFetch("/api/auth/logout", { body: {} });
                         const nextAuth = await apiFetch<AuthState>(
                           "/api/auth/me",
@@ -1910,17 +1938,22 @@ export function App(): React.ReactElement {
                     <div className="tx">
                       <b>JSON形式でバックアップを書き出す</b>
                       <span>
-                        あなたのタスク・メモ・ゴールを1つのJSONファイルとして保存します
+                        {isNativeApp() ? "あなたのタスク・メモ・ゴールをJSON形式で共有します" : "あなたのタスク・メモ・ゴールを1つのJSONファイルとして保存します"}
                       </span>
                     </div>
-                    <a
+                    {isNativeApp() ? <button className="btn ghost" onClick={async () => {
+                      try {
+                        const backup = await apiFetch<unknown>("/api/export");
+                        await Share.share({ title: "SymNoteのバックアップ", text: JSON.stringify(backup, null, 2) });
+                      } catch { showToast("バックアップの共有を完了できませんでした。"); }
+                    }}>共有する</button> : <a
                       href="/api/export"
                       download="symnote-backup.json"
                       className="btn ghost"
                       style={{ textDecoration: "none" }}
                     >
                       書き出す
-                    </a>
+                    </a>}
                   </div>
                 </div>
               </div>

@@ -3,32 +3,32 @@
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
 import hashlib
 import json
 import os
 import secrets
 import time
+import urllib.request
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlencode, urlparse
-import urllib.request
 
 from starlette.requests import Request
 from starlette.responses import Response
 
 from symnote.core import postgres
 from symnote.core.accounts import (
+    SESSION_TTL_SECONDS,
     InviteRequiredError,
-     SESSION_TTL_SECONDS,
     UserRecord,
     authenticate_email,
+    consume_web_oauth_state,
     create_session,
     ensure_local_owner_user,
     get_user_by_session,
     invite_user,
     revoke_session,
     save_web_oauth_state,
-    consume_web_oauth_state,
 )
 from symnote.core.runtime import PASSCODE_LIMITER, app_passcode, passcode_source
 
@@ -131,13 +131,32 @@ def verify_csrf(request: Request) -> Optional[str]:
     return None
 
 
+def request_session_token(request: Request) -> str:
+    """Use a marked, well-formed Bearer token; only absent Authorization falls back to Cookie."""
+    authorization = request.headers.get("authorization", "").strip()
+    if authorization:
+        scheme, separator, token = authorization.partition(" ")
+        if (
+            request.headers.get(CSRF_HEADER_NAME, "").strip() == "1"
+            and separator
+            and scheme.lower() == "bearer"
+            and token.strip()
+            and " " not in token.strip()
+        ):
+            return token.strip()
+        return ""
+    return request.cookies.get(SESSION_COOKIE_NAME, "").strip()
+
+
 def resolve_request_user(request: Request) -> Optional[UserRecord]:
-    """リクエストのセッション Cookie（またはローカル開発時の自動オーナー）から利用者を返す。"""
-    token = request.cookies.get(SESSION_COOKIE_NAME, "").strip()
+    """リクエストのセッション（Bearer/Cookie）またはローカル自動オーナーから利用者を返す。"""
+    token = request_session_token(request)
     if token:
         user = get_user_by_session(token)
         if user is not None:
             return user
+    if request.headers.get("authorization", "").strip():
+        return None
     # Google OAuth も合言葉も未設定で、かつローカルからのアクセスなら自動的にオーナーとして扱う
     if (
         not postgres.enabled()
@@ -335,6 +354,7 @@ __all__ = [
     "e2e_mode_enabled",
     "google_oauth_config",
     "is_loopback_request",
+    "request_session_token",
     "resolve_request_user",
     "revoke_session",
     "set_session_cookie",
