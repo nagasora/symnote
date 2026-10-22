@@ -54,7 +54,7 @@ def test_schema_name_is_safe_stable_and_scoped() -> None:
     assert postgres.current_schema() == postgres.OWNER_SCHEMA
 
 
-def test_postgres_snapshot_matches_sqlite_v16_columns(
+def test_postgres_snapshot_matches_sqlite_v18_columns(
     pg_url: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from symnote.config import use_db_path
@@ -214,7 +214,7 @@ def test_implicit_writes_are_serialized_before_relation_locks(
         self: postgres.Connection, query: str, parameters=None
     ) -> postgres.Cursor:
         thread_name = threading.current_thread().name
-        if "review-delete" in thread_name and "INSERT INTO calendar_sync_outbox" in query:
+        if "review-delete" in thread_name and query.strip().upper() == "BEGIN IMMEDIATE":
             delete_attempted_write.set()
         result = original_execute(self, query, parameters)
         if (
@@ -358,6 +358,30 @@ def test_newer_schema_version_is_rejected(pg_url: str) -> None:
             )
         with pytest.raises(RuntimeError, match="newer version"):
             db.init_db()
+
+
+def test_v17_to_v18_bonus_migration_is_additive(pg_url: str) -> None:
+    user_id = f"pytest-v17-v18-{uuid.uuid4()}"
+    with postgres.user_schema(user_id):
+        db.init_db()
+        item_id = db.insert_task("Preserved")
+        with db.connection() as conn, conn:
+            conn.execute("DROP TABLE quest_bonus_log")
+            conn.execute("DELETE FROM _symnote_schema_migrations WHERE version = 18")
+
+        db.init_db()
+        db.init_db()
+
+        assert db.fetch_item(item_id) is not None
+        with db.connection() as conn:
+            version = conn.execute(
+                "SELECT MAX(version) FROM _symnote_schema_migrations"
+            ).fetchone()[0]
+            table = conn.execute(
+                "SELECT to_regclass('quest_bonus_log')"
+            ).fetchone()[0]
+        assert version == postgres.POSTGRES_SCHEMA_VERSION == 18
+        assert table == "quest_bonus_log"
 
 
 def test_system_connection_creates_only_shared_schema(pg_url: str) -> None:

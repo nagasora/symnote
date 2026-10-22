@@ -1,0 +1,64 @@
+@keyframes check-pop {
+  0% {
+    transform: scale(0.72);
+  }
+  65% {
+    transform: scale(1.18);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@keyframes xp-rise {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.85);
+  }
+  35% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-42px) scale(1.08);
+  }
+}
+@keyframes celebrate-in {
+  from {
+    opacity: 0;
+    transform: translateY(28px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes ready-glow {
+  50% {
+    box-shadow: 0 0 0 8px var(--sun-soft);
+  }
+}
+.just-cleared .quest-check {
+  animation: check-pop var(--dur-2) var(--ease-pop);
+}
+.xp-float {
+  animation: xp-rise var(--dur-cele) var(--ease-out) both;
+}
+.celebration-card {
+  animation: celebrate-in var(--dur-3) var(--ease-pop);
+}
+.chest.ready {
+  animation: ready-glow 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0ms !important;
+  }
+  .xp-float {
+    display: none;
+  }
+}

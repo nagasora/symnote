@@ -22,6 +22,36 @@ from symnote.core.accounts import (
 CSRF = {"X-SymNote": "1"}
 
 
+def test_trash_requires_approval_scope_and_restores_once(api_env: Path) -> None:
+    app = create_app()
+    owner = _login_client(app, "owner@example.com", is_owner=True)
+    invite_user("trash-member@example.com")
+    member = _login_client(app, "trash-member@example.com")
+    anonymous = TestClient(app)
+    assert anonymous.get("/api/trash").status_code == 401
+    task = owner.post("/api/tasks", json={"title": "復元する用事"}, headers=CSRF).json()["task"]
+    from symnote.core import db
+    with user_scope(authenticate_email("owner@example.com")):
+        with db.connection() as conn, conn:
+            conn.execute("UPDATE items SET embedding = ? WHERE id = ?", (b"\x00\xff", task["id"]))
+    assert owner.delete(f"/api/tasks/{task['id']}", headers=CSRF).status_code == 200
+    assert owner.get(f"/api/tasks/{task['id']}").status_code == 404
+    rows = owner.get("/api/trash").json()["items"]
+    assert len(rows) == 1
+    assert set(rows[0]) == {"id", "kind", "title", "deleted_at"}
+    trash_id = rows[0]["id"]
+    assert member.get("/api/trash").json()["items"] == []
+    endpoint = f"/api/trash/{trash_id}/restore"
+    assert owner.post(endpoint).status_code == 403
+    assert member.post(endpoint, headers=CSRF).status_code == 404
+    restored = owner.post(endpoint, headers=CSRF)
+    assert restored.status_code == 200, restored.text
+    new_id = restored.json()["restored_id"]
+    assert owner.get(f"/api/tasks/{new_id}").json()["task"]["title"] == "復元する用事"
+    assert owner.post(endpoint, headers=CSRF).status_code == 404
+    assert owner.get("/api/trash").json()["items"] == []
+
+
 @pytest.fixture(params=["sqlite", "postgres"] if os.getenv("SYMNOTE_TEST_POSTGRES_DSN") else ["sqlite"])
 def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request):
     monkeypatch.setenv("DB_PATH", str(tmp_path / "owner" / "symnote.db"))
@@ -945,3 +975,138 @@ def test_postgres_rejects_inherited_owner_passcode(api_env, monkeypatch):
     assert client.get("/api/auth/me").json()["passcode_enabled"] is False
     response = client.post("/api/auth/login", json={"passcode": "synthetic-local-passcode"}, headers=CSRF)
     assert response.status_code == 401
+
+
+@pytest.mark.parametrize("finish_via_focus", [False, True])
+def test_game_loop_rewards_focus_shop_and_buddy(api_env: Path, finish_via_focus: bool) -> None:
+    client = _login_client(create_app(), "owner@example.com", is_owner=True)
+    initial = client.get("/api/player").json()
+    assert initial["buddy"]["name"] == "ミナ"
+    patched = client.patch("/api/settings/buddy", json={"name": "ソラ", "user_name": "そら", "sound_enabled": False}, headers=CSRF)
+    assert patched.status_code == 200
+    assert client.get("/api/player").json()["buddy"]["name"] == "ソラ"
+    task = client.post("/api/tasks", json={"title": "一歩進む", "estimate_minutes": 15}, headers=CSRF).json()["task"]
+    assert task["quest"]["stars"] == 1
+    assert task["quest"]["xp"] > 0
+    today = client.get("/api/today").json()
+    assert today["daily_clear"]["target"] == 1
+    assert today["capacity"]["planned_minutes"] == 15
+    session = client.post("/api/focus", json={"task_id": task["id"], "minutes": 15}, headers=CSRF).json()["session"]
+    stopped = client.post(f"/api/focus/{session['id']}/stop", headers=CSRF)
+    assert stopped.status_code == 200
+    assert client.get("/api/focus").json()["session"] is None
+    if finish_via_focus:
+        session = client.post("/api/focus", json={"task_id": task["id"], "minutes": 15}, headers=CSRF).json()["session"]
+        complete = client.post(f"/api/focus/{session['id']}/finish", json={"complete_task": True}, headers=CSRF).json()
+    else:
+        complete = client.post(f"/api/tasks/{task['id']}/complete", headers=CSRF).json()
+    assert complete["reward"]["xp"] == task["quest"]["xp"]
+    assert complete["daily_clear"]["xp"] == 20
+    assert complete["reward"]["new_achievements"][0]["code"] == "first_quest"
+    xp = complete["player"]["xp_total"]
+    assert client.post(f"/api/tasks/{task['id']}/reopen", json={}, headers=CSRF).status_code == 200
+    again = client.post(f"/api/tasks/{task['id']}/complete", headers=CSRF).json()
+    assert again["reward"] is None and again["daily_clear"] is None
+    assert again["player"]["xp_total"] == xp
+    reward_id = client.post("/api/rewards", json={"title": "お茶", "cost": 1}, headers=CSRF).json()["id"]
+    gold = again["player"]["gold"]
+    assert client.post(f"/api/rewards/{reward_id}/redeem", headers=CSRF).json()["gold"] == gold - 1
+    expensive = client.post("/api/rewards", json={"title": "旅", "cost": 100000}, headers=CSRF).json()["id"]
+    no_gold = client.post(f"/api/rewards/{expensive}/redeem", headers=CSRF)
+    assert no_gold.status_code == 409 and no_gold.json()["code"] == "insufficient_gold"
+    assert client.delete(f"/api/rewards/{reward_id}", headers=CSRF).status_code == 200
+    assert len(client.get("/api/quests/history?days=28").json()["days"]) == 28
+    assert client.get("/api/review/weekly").status_code == 200
+
+
+def test_seed_preview_adoption_reports_and_game_user_boundaries(api_env: Path) -> None:
+    from symnote.core import db, delegation
+    owner = _login_client(create_app(), "owner@example.com", is_owner=True)
+    invite_user("game-member@example.com")
+    member = _login_client(create_app(), "game-member@example.com")
+    seed = owner.post("/api/seeds", json={"text": "小さなアプリを作る"}, headers=CSRF).json()["seed"]
+    seed_id = seed["id"]
+    preview = owner.post(f"/api/seeds/{seed_id}/plan", json={"why": "毎日を助ける", "done_when": "一人が使える"}, headers=CSRF)
+    assert preview.status_code == 200, preview.text
+    plan = preview.json()
+    assert plan["ai_used"] is False and len(plan["stages"]) == 3
+    assert owner.get("/api/maps").json()["maps"] == []
+    assert member.get("/api/seeds").json()["seeds"] == []
+    assert member.post(f"/api/seeds/{seed_id}/plan", json={}, headers=CSRF).status_code == 404
+    adopted = owner.post(f"/api/seeds/{seed_id}/adopt", json={"plan": plan, "today_first": True}, headers=CSRF)
+    assert adopted.status_code == 200, adopted.text
+    result = adopted.json()
+    assert owner.post(f"/api/seeds/{seed_id}/adopt", json={"plan": plan, "today_first": True}, headers=CSRF).json() == result
+    assert owner.get("/api/seeds").json()["seeds"] == []
+    view = owner.get(f"/api/maps/{result['goal_id']}").json()
+    assert view["current_task_id"] == result["task_ids"][0]
+    assert member.get(f"/api/maps/{result['goal_id']}").status_code in (400, 404)
+    with user_scope(authenticate_email("owner@example.com")):
+        report_id = delegation.record_progress(result["task_ids"][0], None, "一歩進みました")
+    assert len(owner.get("/api/reports").json()["reports"]) == 1
+    assert member.post(f"/api/reports/{report_id}/approve", headers=CSRF).status_code == 404
+    decided = owner.post(f"/api/reports/{report_id}/approve", headers=CSRF)
+    assert decided.status_code == 200 and decided.json()["triage_bonus"]["xp"] == 2
+    assert owner.post(f"/api/reports/{report_id}/approve", headers=CSRF).status_code == 409
+    assert member.get("/api/player").json()["xp_total"] == 0
+    assert owner.get("/api/player").json()["xp_total"] == 2
+    assert owner.patch("/api/settings/buddy", json={"name": "test"}).status_code == 403
+    assert TestClient(create_app()).get("/api/player").status_code == 401
+
+
+def test_today_capacity_is_unknown_without_calendar_and_merges_busy_intervals(api_env, monkeypatch):
+    import datetime as dt
+    from symnote.api import game
+    from symnote.core import calendar_events, google_calendar, runtime
+    client = _login_client(create_app(), "owner@example.com", is_owner=True)
+    assert client.get("/api/today").json()["capacity"]["free_minutes"] is None
+    monkeypatch.setattr(runtime, "is_test_mode", lambda: False)
+    monkeypatch.setattr(google_calendar, "is_connected", lambda: True)
+    day = dt.date.today().isoformat()
+    events = [
+        {"id": "a", "summary": "会議A", "start": {"dateTime": f"{day}T10:00:00+09:00"}, "end": {"dateTime": f"{day}T11:00:00+09:00"}},
+        {"id": "b", "summary": "会議B", "start": {"dateTime": f"{day}T10:30:00+09:00"}, "end": {"dateTime": f"{day}T12:00:00+09:00"}},
+    ]
+    monkeypatch.setattr(calendar_events, "fetch_events", lambda *args, **kwargs: calendar_events.EventFetchResult(events, fetched_at=day))
+    with user_scope(authenticate_email("owner@example.com")):
+        agenda, free = game.calendar_payload(authenticate_email("owner@example.com"), dt.date.today())
+    assert len(agenda) == 2
+    assert free == 22 * 60
+
+
+def test_capture_classifies_mixed_items_and_commits_atomically(api_env):
+    client = _login_client(create_app(), "owner@example.com", is_owner=True)
+    preview = client.post("/api/capture/split", json={"text": "資料を送る\nメモ：好きな本\nたね：新しいアプリを作りたい"}, headers=CSRF).json()
+    assert [item["kind"] for item in preview["items"]] == ["task", "memo", "seed"]
+    bad_items = [*preview["items"], {"title": "不正な日付", "due_date": "bad-date"}]
+    bad = client.post("/api/capture/commit-split", json={"items": bad_items, "source_text": "原文", "save_source_memo": True}, headers=CSRF)
+    assert bad.status_code == 400
+    assert client.get("/api/tasks?status=all").json()["tasks"] == []
+    assert client.get("/api/memos").json()["memos"] == []
+    committed = client.post("/api/capture/commit-split", json={"items": preview["items"]}, headers=CSRF)
+    assert committed.status_code == 200, committed.text
+    result = committed.json()
+    assert [len(result[key]) for key in ("tasks", "memos", "seeds")] == [1, 1, 1]
+    assert len(client.get("/api/seeds").json()["seeds"]) == 1
+    goal_id = client.post("/api/goals", json={"title": "既存の冒険"}, headers=CSRF).json()["goal"]["id"]
+    hidden = client.post("/api/capture/commit-split", json={"items": [{"kind": "seed", "title": "見えなくなるたね", "goal_id": goal_id}]}, headers=CSRF)
+    assert hidden.status_code == 400
+    assert len(client.get("/api/seeds").json()["seeds"]) == 1
+
+
+def test_quest_detail_recurrence_edits_and_rollback(api_env):
+    client = _login_client(create_app(), "owner@example.com", is_owner=True)
+    task = client.post("/api/tasks", json={"title": "習慣", "due_date": "2026-10-23"}, headers=CSRF).json()["task"]
+    endpoint = f"/api/tasks/{task['id']}"
+    added = client.patch(endpoint, json={"importance": 5, "effort": "long", "energy": "high", "recurrence": {"frequency": "weekly", "weekdays": [4]}}, headers=CSRF)
+    assert added.status_code == 200, added.text
+    edited = added.json()["task"]
+    assert edited["recurrence"]["frequency"] == "weekly"
+    assert edited["importance"] == 5 and edited["effort"] == "long" and edited["energy"] == "high"
+    failed = client.patch(endpoint, json={"title": "保存されてはいけない", "recurrence": {"frequency": "daily", "end_date": "2020-01-01"}}, headers=CSRF)
+    assert failed.status_code == 400
+    assert client.get(endpoint).json()["task"]["title"] == "習慣"
+    assert client.get(endpoint).json()["task"]["recurrence"]["frequency"] == "weekly"
+    stopped = client.patch(endpoint, json={"stop_recurrence": True}, headers=CSRF)
+    assert stopped.status_code == 200
+    assert "停止" in stopped.json()["task"]["recurrence"]["label"]

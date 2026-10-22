@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Share } from "@capacitor/share";
 import { readDeviceDraft, saveDeviceDraft } from "./nativeDrafts";
+import { Buddy } from "./components/buddy/Buddy";
 
 export function NativeCapture() {
   const [text, setText] = useState("");
@@ -42,7 +43,7 @@ export function NativeCapture() {
 
   return <main className="auth-wrap" style={{ paddingTop: "max(24px, env(safe-area-inset-top))", paddingBottom: "max(24px, env(safe-area-inset-bottom))" }}>
     <section className="card auth-card" style={{ width: "100%", maxWidth: 640 }}>
-      <div className="brand"><span className="brand-mark">S</span><span className="brand-name">SymNote</span></div>
+      <div className="brand"><Buddy size={40} /><span className="brand-name">SymNote</span></div>
       <h1 className="serif">この端末のメモ</h1>
       <p>思いついたことを、ネットにつながっていなくても書き留められます。</p>
       <label htmlFor="device-draft">メモ</label>

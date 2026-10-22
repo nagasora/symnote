@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>スマホ たねを地図にする</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@500;700;800&amp;family=Zen+Maru+Gothic:wght@500;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#1C6AA6}a:hover{color:#134d7a}
+.sn{font-family:"Zen Maru Gothic","Hiragino Maru Gothic ProN",system-ui,sans-serif;color:#3B2A20;background:#FFF6E6;font-weight:500}
+.h{font-family:"M PLUS Rounded 1c","Hiragino Maru Gothic ProN",system-ui,sans-serif;font-weight:800;letter-spacing:.01em}
+.num{font-family:"M PLUS Rounded 1c","Hiragino Maru Gothic ProN",system-ui,sans-serif;font-weight:800;font-variant-numeric:tabular-nums}
+.card{background:#FFFFFF;border:2px solid #F0DFC2;border-radius:20px;box-shadow:0 4px 0 #F0DFC2}
+.btn{font:inherit;font-weight:700;font-size:15px;border:0;border-radius:16px;min-height:48px;padding:0 16px;display:inline-flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;color:#3B2A20;text-decoration:none}
+.btn-sun{background:#FFC23D;box-shadow:0 4px 0 #E09A00}
+.btn-ghost{background:#FFFFFF;border:2px solid #F0DFC2;box-shadow:0 4px 0 #F0DFC2}
+.chip{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:700;white-space:nowrap}
+.c-xp{background:#E3F6E9;color:#1F7A44}
+.c-sky{background:#E2F2FD;color:#1C6AA6}
+.c-grape{background:#EEE8FF;color:#6045C2}
+.c-plain{background:#FFF0D6;color:#6B5546}
+.ico{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.faint{color:#7A6555}
+.muted{color:#6B5546}
+.label{font-size:12px;font-weight:700;color:#7A6555;letter-spacing:.06em}
+.step{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;font-size:11px;font-weight:700;color:#7A6555}
+.dot{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px}
+.qa{display:flex;gap:10px;font-size:13px;line-height:1.6;padding:8px 0}
+.qa+.qa{border-top:2px dashed #F0DFC2}
+.st{display:flex;align-items:center;gap:10px;padding:12px 14px}
+.st+.st{border-top:2px dashed #F0DFC2}
+.tick{width:26px;height:26px;border-radius:9px;background:#4CB872;box-shadow:0 2px 0 #2E8A50;color:#FFFFFF;display:flex;align-items:center;justify-content:center;flex:none}
+</style>
+</helmet>
+<div class="sn" style="width: 390px; height: 844px; position: relative; overflow: hidden;">
+  <div style="box-sizing: border-box; height: 100%; padding: 14px 16px 24px; display: flex; flex-direction: column; gap: 14px;">
+    <div style="display: flex; align-items: center; gap: 8px;">
+      <a class="btn" href="#seeds" aria-label="たねにもどる" style="min-height: 44px; width: 44px; padding: 0; background: #FFFFFF; border: 2px solid #F0DFC2;"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"></path></svg></a>
+      <div style="flex: 1; display: flex; align-items: flex-start;">
+        <div class="step"><span class="dot num" style="background: #4CB872; color: #FFFFFF;">1</span>たね</div>
+        <div class="step"><span class="dot num" style="background: #4CB872; color: #FFFFFF;">2</span>3つの質問</div>
+        <div class="step" style="color: #3B2A20;"><span class="dot num" style="background: #FFC23D; box-shadow: 0 3px 0 #E09A00;">3</span>地図の案</div>
+      </div>
+    </div>
+
+    <div class="card" style="padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; border-color: #C9B8F7; box-shadow: 0 4px 0 #C9B8F7;">
+      <span class="chip c-grape" style="align-self: flex-start;">たね</span>
+      <h1 class="h" style="margin: 0; font-size: 20px;">英語で論文を書けるようになりたい</h1>
+      <div>
+        <div class="qa"><b style="flex: none; width: 76px;">なぜ？</b><span class="muted">海外の学会に1本出したい</span></div>
+        <div class="qa"><b style="flex: none; width: 76px;">できたら</b><span class="muted">先生の手直しが2回以内で通る</span></div>
+        <div class="qa"><b style="flex: none; width: 76px;">いつまで</b><span class="muted">来年3月</span></div>
+      </div>
+    </div>
+
+    <div style="display: flex; gap: 10px; align-items: center;">
+      <svg viewBox="0 0 64 64" width="44" height="44" aria-hidden="true" style="flex: none;"><ellipse cx="25" cy="12" rx="8" ry="4.5" transform="rotate(-30 25 12)" fill="#4CB872"></ellipse><ellipse cx="39" cy="12" rx="8" ry="4.5" transform="rotate(30 39 12)" fill="#4CB872"></ellipse><ellipse cx="32" cy="40" rx="24" ry="21" fill="#FFD36B" stroke="#E09A00" stroke-width="2"></ellipse><path d="M20 39q4-5 8 0M36 39q4-5 8 0" stroke="#3B2A20" stroke-width="2.6" fill="none" stroke-linecap="round"></path><path d="M27 45q5 7 10 0z" fill="#3B2A20"></path></svg>
+      <div style="flex: 1; background: #FFFFFF; border: 2px solid #F0DFC2; border-radius: 16px; padding: 10px 14px; font-size: 14px; line-height: 1.6;">4つのステージに分けてみたよ。まずは<b>ステージ1</b>だけ、小さなクエストにしてある。</div>
+    </div>
+
+    <div class="card">
+      <div class="st" style="flex-direction: column; align-items: stretch; gap: 8px; background: #FFFBF3; border-radius: 18px 18px 0 0;">
+        <div style="display: flex; align-items: center; gap: 8px;"><span class="chip c-sky num">ステージ 1</span><b style="font-size: 15px;">読む型を身につける</b><span class="faint num" style="margin-left: auto; font-size: 12px;">〜11月</span></div>
+        <div style="display: flex; align-items: center; gap: 10px;"><span class="tick" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24" style="width: 16px; height: 16px; stroke-width: 3.2;"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></span><span style="flex: 1; font-size: 14px;">分野の論文を1本選ぶ</span><span class="chip c-xp num">+8</span></div>
+        <div style="display: flex; align-items: center; gap: 10px;"><span class="tick" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24" style="width: 16px; height: 16px; stroke-width: 3.2;"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></span><span style="flex: 1; font-size: 14px;">Abstract の型を3つメモ</span><span class="chip c-xp num">+12</span></div>
+        <div style="display: flex; align-items: center; gap: 10px;"><span class="tick" aria-hidden="true"><svg class="ico" viewBox="0 0 24 24" style="width: 16px; height: 16px; stroke-width: 3.2;"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></span><span style="flex: 1; font-size: 14px;">毎朝20分 1本要約（くり返し）</span><span class="chip c-xp num">+16</span></div>
+      </div>
+      <div class="st"><span class="chip c-plain num">ステージ 2</span><span style="font-size: 14px;">短い英文を毎週書く</span></div>
+      <div class="st"><span class="chip c-plain num">ステージ 3</span><span style="font-size: 14px;">自分の研究で1章書く</span></div>
+      <div class="st"><span class="chip c-plain num">ステージ 4</span><span style="font-size: 14px;">先生に見てもらって投稿</span></div>
+    </div>
+
+    <div style="margin-top: auto; display: flex; flex-direction: column; gap: 10px;">
+      <button class="btn btn-sun" type="button">この地図で冒険をはじめる</button>
+      <button class="btn btn-ghost" type="button">ミナともう少し相談する</button>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

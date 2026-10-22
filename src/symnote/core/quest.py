@@ -26,6 +26,35 @@ class PlayerStats:
 
 
 @dataclass(frozen=True)
+class StreakInfo:
+    """Current streak length and the automatic rest used in this ISO week."""
+
+    streak_days: int
+    rest_days_used_this_week: int
+
+
+@dataclass(frozen=True)
+class QuestPreview:
+    """Read-only reward and effort preview for one unfinished task."""
+
+    xp: int
+    gold: int
+    stars: int
+    is_boss: bool
+
+
+@dataclass(frozen=True)
+class BonusReward:
+    """An idempotent reward granted outside normal task completion."""
+
+    kind: str
+    ref: str
+    xp: int
+    gold: int
+    created_at: str
+
+
+@dataclass(frozen=True)
 class QuestReward:
     """一回の完了に対する報酬と、その時点で発生した演出情報。"""
 
@@ -96,15 +125,45 @@ def _title_for_level(level: int) -> str:
     return "見習い冒険者"
 
 
-def _streak(completed_days: List[date], today: date) -> int:
-    """今日未完了でも昨日から続く連続完了日数を維持する。"""
-    days = set(completed_days)
-    cursor = today if today in days else today - timedelta(days=1)
+def _streak_details(completed_days: List[date], today: date) -> Tuple[int, set[date]]:
+    """Reserve each week's first eligible rest chronologically and return the current suffix."""
+    days = {day for day in completed_days if day <= today}
+    if not days:
+        return 0, set()
+    target = today if today in days else today - timedelta(days=1)
+    relevant_days = {day for day in days if day <= target}
+    if not relevant_days:
+        return 0, set()
+    cursor = min(relevant_days)
     count = 0
-    while cursor in days:
-        count += 1
-        cursor -= timedelta(days=1)
-    return count
+    rest_days: set[date] = set()
+    rest_weeks: set[Tuple[int, int]] = set()
+    previous_was_completed = False
+    while cursor <= target:
+        if cursor in relevant_days:
+            count += 1
+            previous_was_completed = True
+        else:
+            iso = cursor.isocalendar()
+            week = (iso.year, iso.week)
+            if previous_was_completed and week not in rest_weeks:
+                # Reserve the coupon when the blank is first encountered. A
+                # later completion cannot move it to a more convenient day.
+                rest_days.add(cursor)
+                rest_weeks.add(week)
+                count += 1
+            else:
+                count = 0
+            # A rest day is still a blank, so the following blank cannot also
+            # consume a coupon even when it belongs to another ISO week.
+            previous_was_completed = False
+        cursor += timedelta(days=1)
+    return count, rest_days
+
+
+def _streak(completed_days: List[date], today: date) -> int:
+    """Keep the historical integer interface while applying automatic rest days."""
+    return _streak_details(completed_days, today)[0]
 
 
 def _metadata(raw: str) -> Dict[str, Any]:
@@ -120,6 +179,7 @@ def _gold_balance(conn: sqlite3.Connection) -> int:
     """獲得額から交換済み総額を引いた残高を取得する。"""
     return int(conn.execute(
         "SELECT (SELECT COALESCE(SUM(gold), 0) FROM quest_log) + "
+        "(SELECT COALESCE(SUM(gold), 0) FROM quest_bonus_log) + "
         "(SELECT COALESCE(SUM(bonus_gold), 0) FROM focus_sessions WHERE outcome = 'done' AND ended_at IS NOT NULL) - "
         "(SELECT COALESCE(SUM(cost), 0) FROM reward_redemptions)"
     ).fetchone()[0])
@@ -129,6 +189,7 @@ def _stats(conn: sqlite3.Connection, today: date) -> PlayerStats:
     """接続内の同一スナップショットからプレイヤー情報を組み立てる。"""
     xp_total = int(conn.execute(
         "SELECT (SELECT COALESCE(SUM(xp), 0) FROM quest_log) + "
+        "(SELECT COALESCE(SUM(xp), 0) FROM quest_bonus_log) + "
         "(SELECT COALESCE(SUM(bonus_xp), 0) FROM focus_sessions WHERE outcome = 'done' AND ended_at IS NOT NULL)"
     ).fetchone()[0])
     days = [date.fromisoformat(row[0]) for row in conn.execute(
@@ -144,6 +205,22 @@ def get_player_stats(today: Optional[date] = None) -> PlayerStats:
     with connection() as conn, conn:
         conn.execute("BEGIN")
         return _stats(conn, today or date.today())
+
+
+def streak_info(today: Optional[date] = None) -> StreakInfo:
+    """Return the current streak and rest ticket usage without changing state."""
+    target = today or date.today()
+    with connection() as conn:
+        days = [date.fromisoformat(row[0]) for row in conn.execute(
+            "SELECT substr(completed_at, 1, 10) FROM quest_log"
+        )]
+    streak_days, rest_days = _streak_details(days, target)
+    target_iso = target.isocalendar()
+    used = sum(
+        day.isocalendar().year == target_iso.year and day.isocalendar().week == target_iso.week
+        for day in rest_days
+    )
+    return StreakInfo(streak_days, used)
 
 
 def _calculate_reward(task: Mapping[str, Any], completed: datetime) -> Tuple[int, int, List[str], bool]:
@@ -168,6 +245,22 @@ def _calculate_reward(task: Mapping[str, Any], completed: datetime) -> Tuple[int
         bonuses.append("期限内クリア +30%")
     earned = max(1, int(xp + 0.5))
     return earned, max(1, (earned + 1) // 2), bonuses, on_time
+
+
+def quest_preview(task: Mapping[str, Any], now: datetime) -> QuestPreview:
+    """Calculate the reward and weight shown before completion without writing."""
+    xp, gold, _, _ = _calculate_reward(task, now)
+    minutes = task.get("estimate_minutes")
+    stars: int
+    if minutes is not None:
+        try:
+            estimate = int(minutes)
+        except (TypeError, ValueError):
+            estimate = 0
+        stars = 1 if estimate <= 15 else 2 if estimate <= 60 else 3
+    else:
+        stars = {"medium": 2, "long": 3}.get(str(task.get("effort") or "short").lower(), 1)
+    return QuestPreview(xp, gold, stars, stars == 3)
 
 
 def _unlock_achievements(conn: sqlite3.Connection, completed: datetime) -> List[str]:
@@ -229,7 +322,146 @@ def award_for_completion_in_transaction(conn: sqlite3.Connection, task_row: Mapp
     achievements = _unlock_achievements(conn, completed)
     metadata.update(bonuses=bonuses, level_before=before, level_after=after.level, new_achievements=achievements)
     conn.execute("UPDATE quest_log SET bonus = ? WHERE task_id = ?", (json.dumps(metadata, ensure_ascii=False), task_id))
-    return QuestReward(task_id, str(task.get("raw_text") or "クエスト"), xp, gold, bonuses, before, after.level, achievements)
+    return QuestReward(task_id, _quest_title(task), xp, gold, bonuses, before, after.level, achievements)
+
+
+def _reward_from_row(row: Mapping[str, Any]) -> QuestReward:
+    """Rebuild the completion-time reward response from persisted metadata."""
+    meta = _metadata(str(row["bonus"]))
+    return QuestReward(
+        int(row["task_id"]),
+        str(row["title"]),
+        int(row["xp"]),
+        int(row["gold"]),
+        list(meta.get("bonuses", [])),
+        int(meta.get("level_before", 1)),
+        int(meta.get("level_after", 1)),
+        list(meta.get("new_achievements", [])),
+    )
+
+
+def reward_for_task(task_id: int) -> Optional[QuestReward]:
+    """Read one persisted task reward without consuming its unseen marker."""
+    with connection() as conn:
+        row = conn.execute("SELECT * FROM quest_log WHERE task_id = ?", (task_id,)).fetchone()
+    return None if row is None else _reward_from_row(row)
+
+
+def mark_reward_seen(task_id: int) -> bool:
+    """Atomically claim a reward for presentation; return false if already claimed."""
+    with connection() as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            "UPDATE quest_log SET seen = 1 WHERE task_id = ? AND seen = 0", (task_id,)
+        )
+        return bool(cursor.rowcount)
+
+
+def _bonus_from_row(row: Mapping[str, Any]) -> BonusReward:
+    return BonusReward(
+        str(row["kind"]), str(row["ref"]), int(row["xp"]), int(row["gold"]),
+        str(row["created_at"]),
+    )
+
+
+def award_daily_clear_if_eligible(today: date) -> Optional[BonusReward]:
+    """Award the once-per-day chest after the final eligible task is complete."""
+    day = today.isoformat()
+    with connection() as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        unfinished = conn.execute(
+            """
+            SELECT COUNT(*) FROM items
+            WHERE kind = 'task'
+              AND status != 'done'
+              AND (status = 'today' OR (due_date IS NOT NULL AND due_date <= ?))
+            """,
+            (day,),
+        ).fetchone()[0]
+        completed = conn.execute(
+            "SELECT COUNT(*) FROM quest_log WHERE substr(completed_at, 1, 10) = ?",
+            (day,),
+        ).fetchone()[0]
+        if int(unfinished) != 0 or int(completed) == 0:
+            return None
+        created_at = datetime.now().isoformat(timespec="seconds")
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO quest_bonus_log(kind, ref, xp, gold, created_at)
+            VALUES ('daily_clear', ?, 20, 10, ?)
+            """,
+            (day, created_at),
+        )
+        if not cursor.rowcount:
+            return None
+        row = conn.execute(
+            "SELECT * FROM quest_bonus_log WHERE kind = 'daily_clear' AND ref = ?", (day,)
+        ).fetchone()
+        return _bonus_from_row(row)
+
+
+def award_triage(ref: str, *, now: Optional[datetime] = None) -> Optional[BonusReward]:
+    """Award up to twenty unique triage actions per local calendar day."""
+    normalized = str(ref).strip()
+    if not normalized:
+        raise ValueError("triage ref must not be empty")
+    awarded_at = now or datetime.now()
+    day = awarded_at.date().isoformat()
+    created_at = awarded_at.isoformat(timespec="seconds")
+    with connection() as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT 1 FROM quest_bonus_log WHERE kind = 'triage' AND ref = ?", (normalized,)
+        ).fetchone()
+        if existing is not None:
+            return None
+        count = conn.execute(
+            "SELECT COUNT(*) FROM quest_bonus_log "
+            "WHERE kind = 'triage' AND substr(created_at, 1, 10) = ?",
+            (day,),
+        ).fetchone()[0]
+        if int(count) >= 20:
+            return None
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO quest_bonus_log(kind, ref, xp, gold, created_at)
+            VALUES ('triage', ?, 2, 0, ?)
+            """,
+            (normalized, created_at),
+        )
+        if not cursor.rowcount:
+            return None
+        row = conn.execute(
+            "SELECT * FROM quest_bonus_log WHERE kind = 'triage' AND ref = ?", (normalized,)
+        ).fetchone()
+        return _bonus_from_row(row)
+
+
+def quest_history(days: int = 28, *, today: Optional[date] = None) -> List[Dict[str, Any]]:
+    """Return daily completion counts and inferred rest days for footprints."""
+    span = max(1, min(int(days), 366))
+    end = today or date.today()
+    start = end - timedelta(days=span - 1)
+    with connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT substr(completed_at, 1, 10) AS day, COUNT(*) AS count
+            FROM quest_log
+            WHERE substr(completed_at, 1, 10) <= ?
+            GROUP BY substr(completed_at, 1, 10)
+            """,
+            (end.isoformat(),),
+        ).fetchall()
+    counts = {date.fromisoformat(row["day"]): int(row["count"]) for row in rows}
+    _, rest_days = _streak_details(list(counts), end)
+    return [
+        {
+            "day": (current := start + timedelta(days=offset)).isoformat(),
+            "count": counts.get(current, 0),
+            "rest_day": current in rest_days,
+        }
+        for offset in range(span)
+    ]
 
 
 def pop_unseen_rewards() -> List[QuestReward]:
@@ -239,10 +471,7 @@ def pop_unseen_rewards() -> List[QuestReward]:
         rows = conn.execute("SELECT * FROM quest_log WHERE seen = 0 ORDER BY id").fetchall()
         rewards: List[QuestReward] = []
         for row in rows:
-            meta = _metadata(row["bonus"])
-            rewards.append(QuestReward(row["task_id"], row["title"], row["xp"], row["gold"],
-                                       meta.get("bonuses", []), meta.get("level_before", 1),
-                                       meta.get("level_after", 1), meta.get("new_achievements", [])))
+            rewards.append(_reward_from_row(row))
         conn.execute("UPDATE quest_log SET seen = 1 WHERE seen = 0")
         return rewards
 

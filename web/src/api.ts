@@ -19,6 +19,7 @@ export interface AuthState {
 }
 
 export interface RecurrenceRuleDTO {
+  active?: boolean;
   frequency: "daily" | "weekly" | "weekdays" | "monthly";
   interval: number;
   weekdays: number[];
@@ -41,10 +42,25 @@ export interface TaskItem {
   goal_title: string | null;
   estimate_minutes: number | null;
   actual_minutes: number | null;
+  effort?: "short" | "medium" | "long" | null;
+  energy?: "low" | "mid" | "high" | null;
   completed_at: string | null;
   recurrence: RecurrenceRuleDTO | null;
-  source: { type: string; excerpt?: string | null; source_ref?: string | null } | null;
+  source: {
+    type: string;
+    excerpt?: string | null;
+    source_ref?: string | null;
+    source_url?: string | null;
+  } | null;
   created_at: string;
+  quest?: QuestPreview | null;
+}
+
+export interface QuestPreview {
+  xp: number;
+  gold: number;
+  stars: number;
+  is_boss: boolean;
 }
 
 export interface MemoItem {
@@ -54,6 +70,8 @@ export interface MemoItem {
   raw_text: string;
   tags: string;
   created_at: string;
+  goal_id?: number | null;
+  ai_category?: string | null;
 }
 
 export interface CandidateItem {
@@ -171,6 +189,40 @@ export interface TodayPayload {
   pending_candidates_count: number;
   unsorted_count: number;
   inbox_badge_count: number;
+  player?: Player;
+  capacity?: { planned_minutes: number; free_minutes: number | null };
+  daily_clear?: { target: number; done: number; claimed: boolean };
+  period?: "morning" | "day" | "evening";
+  buddy_line?: string;
+}
+
+export interface BuddySettings {
+  name: string;
+  tone: string;
+  user_name?: string;
+  sound_enabled: boolean;
+}
+
+export interface Player {
+  level: number;
+  title: string;
+  xp_total: number;
+  xp_into_level: number;
+  xp_for_next: number;
+  gold: number;
+  streak_days: number;
+  rest_days_used_this_week: number;
+  completed_today: number;
+  buddy: BuddySettings;
+}
+
+export interface CompletionReward {
+  xp: number;
+  gold: number;
+  bonuses: string[];
+  level_before: number;
+  level_after: number;
+  new_achievements: Array<{ code: string; title: string }>;
 }
 
 export interface SplitDraftItem {
@@ -183,6 +235,7 @@ export interface SplitDraftItem {
   urgency: number;
   estimate_minutes: number | null;
   goal_id?: number | null;
+  kind?: "task" | "seed" | "memo";
 }
 
 export interface QuickPreviewResult {
@@ -204,13 +257,19 @@ export async function apiFetch<T>(
   path: string,
   options: { method?: string; body?: unknown } = {},
 ): Promise<T> {
-  const method = options.method ?? (options.body !== undefined ? "POST" : "GET");
+  const method =
+    options.method ?? (options.body !== undefined ? "POST" : "GET");
   if (isNativeApp()) {
     const response = await nativeRequest(path, method, options.body);
     if (response.status < 200 || response.status >= 300) {
-      const data = response.data as { error?: string | { message?: string } } | null;
-      const message = typeof data?.error === "string" ? data.error : data?.error?.message;
-      throw new Error(message || `通信エラーが発生しました (${response.status})`);
+      const data = response.data as {
+        error?: string | { message?: string };
+      } | null;
+      const message =
+        typeof data?.error === "string" ? data.error : data?.error?.message;
+      throw new Error(
+        message || `通信エラーが発生しました (${response.status})`,
+      );
     }
     return response.data as T;
   }
@@ -229,10 +288,22 @@ export async function apiFetch<T>(
     body: bodyStr,
     credentials: "same-origin",
   });
-  const data = await res.json().catch(() => ({}));
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch {
+    if (res.ok)
+      throw new Error(
+        "サーバーからの応答を読み取れませんでした。再読み込みしてください。",
+      );
+    throw new Error(`通信エラーが発生しました (${res.status})`);
+  }
   if (!res.ok) {
     const msg =
-      (data && typeof data === "object" && "error" in data && typeof data.error === "string"
+      (data &&
+      typeof data === "object" &&
+      "error" in data &&
+      typeof data.error === "string"
         ? data.error
         : null) || `通信エラーが発生しました (${res.status})`;
     throw new Error(msg);

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>スマホ 依頼ボード</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@500;700;800&amp;family=Zen+Maru+Gothic:wght@500;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#1C6AA6}a:hover{color:#134d7a}
+.sn{font-family:"Zen Maru Gothic","Hiragino Maru Gothic ProN",system-ui,sans-serif;color:#3B2A20;background:#FFF6E6;font-weight:500}
+.h{font-family:"M PLUS Rounded 1c","Hiragino Maru Gothic ProN",system-ui,sans-serif;font-weight:800;letter-spacing:.01em}
+.num{font-family:"M PLUS Rounded 1c","Hiragino Maru Gothic ProN",system-ui,sans-serif;font-weight:800;font-variant-numeric:tabular-nums}
+.card{background:#FFFFFF;border:2px solid #F0DFC2;border-radius:20px;box-shadow:0 4px 0 #F0DFC2}
+.btn{font:inherit;font-weight:700;font-size:14px;border:0;border-radius:14px;min-height:44px;padding:0 14px;display:inline-flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;color:#3B2A20;text-decoration:none}
+.btn-sun{background:#FFC23D;box-shadow:0 4px 0 #E09A00}
+.btn-ghost{background:#FFFFFF;border:2px solid #F0DFC2;box-shadow:0 4px 0 #F0DFC2}
+.chip{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:700;white-space:nowrap}
+.c-xp{background:#E3F6E9;color:#1F7A44}
+.c-sky{background:#E2F2FD;color:#1C6AA6}
+.c-berry{background:#FFE6E1;color:#B53A28}
+.c-grape{background:#EEE8FF;color:#6045C2}
+.c-plain{background:#FFF0D6;color:#6B5546}
+.ico{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.faint{color:#7A6555}
+.label{font-size:12px;font-weight:700;color:#7A6555;letter-spacing:.06em}
+.seg{flex:1;min-height:44px;border:0;border-radius:12px;font:inherit;font-weight:700;font-size:14px;background:transparent;color:#6B5546;cursor:pointer}
+.seg-on{background:#FFFFFF;color:#3B2A20;box-shadow:0 2px 0 #E6D3B3}
+.quote{margin:0;padding:10px 12px;background:#FFF6E6;border-radius:12px;font-size:13px;line-height:1.6;color:#6B5546}
+.tab{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-height:56px;font-size:11px;font-weight:700;color:#7A6555;text-decoration:none}
+.tab-on{color:#3B2A20}
+.pin{width:14px;height:14px;border-radius:50%;background:#FF7A66;box-shadow:0 2px 0 #D9533F;position:absolute;top:-6px;left:50%;margin-left:-7px}
+</style>
+</helmet>
+<div class="sn" style="width: 390px; height: 844px; position: relative; overflow: hidden;">
+  <div style="box-sizing: border-box; padding: 20px 16px 110px; display: flex; flex-direction: column; gap: 14px;">
+    <header style="display: flex; flex-direction: column; gap: 4px;">
+      <h1 class="h" style="margin: 0; font-size: 26px;">依頼ボード</h1>
+      <p class="faint" style="margin: 0; font-size: 13px;">メールやSlackから、ミナが拾ってきた依頼。受けたものだけクエストになるよ。</p>
+    </header>
+    <div style="display: flex; gap: 4px; background: #F3E6CF; border-radius: 14px; padding: 4px;" role="tablist">
+      <button class="seg seg-on" type="button" role="tab" aria-selected="true">依頼 3</button>
+      <button class="seg" type="button" role="tab" aria-selected="false">メモ 2</button>
+      <button class="seg" type="button" role="tab" aria-selected="false">AIの報告 1</button>
+    </div>
+    <div style="display: flex; align-items: center; gap: 8px;"><span class="chip c-xp">仕分けもクエスト</span><span class="faint" style="font-size: 12px;">受ける・見送る どちらでも +2 XP</span></div>
+
+    <article class="card" style="position: relative; padding: 16px; display: flex; flex-direction: column; gap: 10px;">
+      <span class="pin" aria-hidden="true"></span>
+      <div style="display: flex; align-items: center; gap: 6px; font-size: 12px;"><span class="chip c-berry">Gmail</span><span class="faint">田中 健さん ・ 2時間前</span></div>
+      <b style="font-size: 16px;">見積書の再送（金額の修正版）</b>
+      <p class="quote">「先日の見積もり、税込みの金額で再送いただけますか。金曜までに社内に回したいです。」</p>
+      <div style="display: flex; gap: 5px;"><span class="chip c-sky">金曜まで</span><span class="chip c-plain">★ 15分</span></div>
+      <div style="display: flex; gap: 8px;"><button class="btn btn-ghost" type="button">見送る</button><button class="btn btn-ghost" type="button">直して受ける</button><button class="btn btn-sun" type="button" style="flex: 1;">受ける</button></div>
+    </article>
+
+    <article class="card" style="position: relative; padding: 16px; display: flex; flex-direction: column; gap: 10px;">
+      <span class="pin" aria-hidden="true" style="background: #9C7BF2; box-shadow: 0 2px 0 #7556D6;"></span>
+      <div style="display: flex; align-items: center; gap: 6px; font-size: 12px;"><span class="chip c-grape">Slack</span><span class="faint">#ゼミ ・ 山本先生 ・ きのう</span></div>
+      <b style="font-size: 16px;">発表スライドを水曜に共有</b>
+      <p class="quote">「発表者は水曜中にスライドをドライブに上げておいてください。」</p>
+      <div style="display: flex; gap: 5px;"><span class="chip c-sky">水曜まで</span><span class="chip c-grape">ゼミ発表マップへ</span></div>
+      <div style="display: flex; gap: 8px;"><button class="btn btn-ghost" type="button">見送る</button><button class="btn btn-ghost" type="button">直して受ける</button><button class="btn btn-sun" type="button" style="flex: 1;">受ける</button></div>
+    </article>
+  </div>
+
+  <nav aria-label="メイン" style="position: absolute; left: 0; right: 0; bottom: 0; background: #FFFFFF; border-top: 2px solid #F0DFC2; display: flex; align-items: center; padding: 6px 8px 22px;">
+    <a class="tab" href="#today"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 24px; height: 24px;"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>きょう</a>
+    <a class="tab" href="#map"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 24px; height: 24px;"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2zM9 4v14M15 6v14"></path></svg>マップ</a>
+    <div style="flex: 1; display: flex; justify-content: center;"><button class="btn btn-sun" type="button" aria-label="ミナに渡す" style="width: 60px; height: 60px; border-radius: 22px; padding: 0; margin-top: -26px;"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 28px; height: 28px; stroke-width: 3;"><path d="M12 5v14M5 12h14"></path></svg></button></div>
+    <a class="tab tab-on" href="#board"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 24px; height: 24px; color: #D9533F;"><rect x="5" y="4" width="14" height="17" rx="2"></rect><path d="M9 4V2.5h6V4M9 10h6M9 14h4"></path></svg>依頼</a>
+    <a class="tab" href="#me"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 24px; height: 24px;"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c1-4 4-6 8-6s7 2 8 6"></path></svg>じぶん</a>
+  </nav>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

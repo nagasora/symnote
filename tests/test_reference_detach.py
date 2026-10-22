@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -64,6 +66,68 @@ def test_deleted_goal_report_is_rejected_for_goal_and_descendants(database: Path
 
     row = _one("SELECT status, goal_id FROM agent_reports WHERE id = ?", report)
     assert row == {"status": "rejected", "goal_id": -child}
+
+
+def test_deleted_goal_is_detached_from_trash_before_its_id_is_reused(database: Path) -> None:
+    """削除済みタスクは、後から同じ ID で作られた別ゴールへ復元時に紐付かない。"""
+    old_goal = goals.create_goal("削除するゴール")
+    task = db.insert_task("ゴミ箱のタスク", goal_id=old_goal)
+    db.delete_item(task)
+    trash_id = db.list_trashed_items()[0]["id"]
+
+    goals.delete_goal(old_goal)
+    replacement_goal = goals.create_goal("別のゴール")
+    assert replacement_goal == old_goal
+
+    restored = db.fetch_item(db.restore_trashed_item(trash_id))
+
+    assert restored is not None
+    assert restored["goal_id"] is None
+
+
+def test_trash_ids_are_not_reused_after_restore(database: Path) -> None:
+    """復元済みの古い trash ID が、後で削除した別アイテムを指さない。"""
+    first = db.insert_memo("最初")
+    db.delete_item(first)
+    first_trash_id = db.list_trashed_items()[0]["id"]
+    db.restore_trashed_item(first_trash_id)
+
+    second = db.insert_memo("次")
+    db.delete_item(second)
+    second_trash_id = db.list_trashed_items()[0]["id"]
+
+    assert second_trash_id > first_trash_id
+    with pytest.raises(LookupError):
+        db.restore_trashed_item(first_trash_id)
+
+
+def test_concurrent_restore_commits_exactly_once(database: Path) -> None:
+    """同じ trash ID の同時復元は 1 件だけ成功し、重複アイテムを作らない。"""
+    item = db.insert_task("同時復元")
+    db.delete_item(item)
+    trash_id = db.list_trashed_items()[0]["id"]
+    ready = threading.Barrier(2)
+
+    def restore() -> int:
+        ready.wait(timeout=5)
+        return db.restore_trashed_item(trash_id)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(restore) for _ in range(2)]
+
+    restored_ids: list[int] = []
+    failures: list[Exception] = []
+    for future in futures:
+        try:
+            restored_ids.append(future.result())
+        except Exception as exc:
+            failures.append(exc)
+
+    assert len(restored_ids) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], LookupError)
+    assert db.list_trashed_items() == []
+    assert [row["id"] for row in db.search_items("同時復元")] == restored_ids
 
 
 def test_fetch_tasks_exposes_estimate_goal_and_delegation(database: Path) -> None:

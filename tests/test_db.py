@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from symnote.config import load_config
 from symnote.core.backup import create_backup
 from symnote.core.db import (
@@ -10,6 +12,8 @@ from symnote.core.db import (
     complete_task,
     create_recurring_task,
     fetch_inbox,
+    fetch_item,
+    fetch_seeds,
     fetch_tasks,
     fetch_tasks_for_morning_digest,
     fetch_tasks_for_today_view,
@@ -17,6 +21,8 @@ from symnote.core.db import (
     get_connection,
     init_db,
     insert_task,
+    list_trashed_items,
+    restore_trashed_item,
 )
 
 
@@ -185,6 +191,201 @@ def test_task_changes_are_queued_for_calendar_sync(monkeypatch, tmp_path) -> Non
         ).fetchone()[0] == "delete"
 
 
+def test_delete_archives_and_restore_uses_new_id_without_external_bindings(
+    monkeypatch, tmp_path
+) -> None:
+    database = tmp_path / "trash.db"
+    monkeypatch.setenv("DB_PATH", str(database))
+    init_db()
+    with sqlite3.connect(database) as setup:
+        setup.execute(
+            "INSERT INTO goals (title, created_at, updated_at) VALUES (?, ?, ?)",
+            ("Goal", "2026-10-22T00:00:00", "2026-10-22T00:00:00"),
+        )
+    task_id = create_recurring_task(
+        "Full task details\nsecond line",
+        due_date="2026-10-23",
+        frequency="daily",
+        tags="Visible title",
+        due_time="18:30",
+        status="week",
+        importance=5,
+        urgency=4,
+        effort="long",
+        energy="high",
+        goal_id=1,
+        estimate_minutes=90,
+    )
+    with sqlite3.connect(database) as setup:
+        setup.execute(
+            "UPDATE items SET date = '2026-10-20', delegated_to = 'codex' WHERE id = ?",
+            (task_id,),
+        )
+
+    delete_item(task_id)
+
+    assert fetch_item(task_id) is None
+    trashed = list_trashed_items()
+    assert len(trashed) == 1
+    assert trashed[0]["original_item_id"] == task_id
+    assert trashed[0]["title"] == "Visible title"
+    trash_id = trashed[0]["id"]
+
+    restored_id = restore_trashed_item(trash_id)
+    assert restored_id != task_id
+    restored = fetch_item(restored_id)
+    assert restored is not None
+    assert {
+        key: restored[key]
+        for key in (
+            "raw_text", "date", "due_date", "due_time", "status", "tags",
+            "importance", "urgency", "effort", "energy", "goal_id",
+            "estimate_minutes", "delegated_to",
+        )
+    } == {
+        "raw_text": "Full task details\nsecond line",
+        "date": "2026-10-20",
+        "due_date": "2026-10-23",
+        "due_time": "18:30",
+        "status": "week",
+        "tags": "Visible title",
+        "importance": 5,
+        "urgency": 4,
+        "effort": "long",
+        "energy": "high",
+        "goal_id": 1,
+        "estimate_minutes": 90,
+        "delegated_to": "codex",
+    }
+    assert restored["recurrence_rule_id"] is None
+    assert list_trashed_items() == []
+    with pytest.raises(LookupError):
+        restore_trashed_item(trash_id)
+    with sqlite3.connect(database) as check:
+        assert check.execute(
+            "SELECT operation FROM calendar_sync_outbox WHERE task_id = ?", (task_id,)
+        ).fetchone()[0] == "delete"
+        assert check.execute(
+            "SELECT operation FROM calendar_sync_outbox WHERE task_id = ?", (restored_id,)
+        ).fetchone()[0] == "upsert"
+
+
+def test_v16_to_v18_migrations_are_additive_and_repeatable(monkeypatch, tmp_path) -> None:
+    database = tmp_path / "v16-trash.db"
+    monkeypatch.setenv("DB_PATH", str(database))
+    init_db()
+    item_id = insert_task("Keep me")
+    with sqlite3.connect(database) as legacy:
+        legacy.execute("DROP TABLE item_trash")
+        legacy.execute("PRAGMA user_version = 16")
+
+    init_db()
+    init_db()
+
+    assert fetch_item(item_id) is not None
+    with sqlite3.connect(database) as check:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 18
+        columns = [row[1] for row in check.execute("PRAGMA table_info(item_trash)")]
+        assert columns[:3] == ["id", "original_item_id", "created_at"]
+        bonus_columns = [row[1] for row in check.execute("PRAGMA table_info(quest_bonus_log)")]
+        assert bonus_columns == ["id", "kind", "ref", "xp", "gold", "created_at", "seen"]
+
+
+def test_v17_to_v18_bonus_migration_preserves_items(monkeypatch, tmp_path) -> None:
+    database = tmp_path / "v17-bonus.db"
+    monkeypatch.setenv("DB_PATH", str(database))
+    init_db()
+    item_id = insert_task("Keep through v18")
+    with sqlite3.connect(database) as legacy:
+        legacy.execute("DROP TABLE quest_bonus_log")
+        legacy.execute("PRAGMA user_version = 17")
+
+    init_db()
+    init_db()
+
+    assert fetch_item(item_id) is not None
+    with sqlite3.connect(database) as check:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 18
+        assert check.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='quest_bonus_log'"
+        ).fetchone() == ("quest_bonus_log",)
+
+
+def test_fetch_seeds_returns_only_unadopted_idea_and_someday_memos(
+    monkeypatch, tmp_path
+) -> None:
+    database = tmp_path / "seeds.db"
+    monkeypatch.setenv("DB_PATH", str(database))
+    init_db()
+    from symnote.core.db import insert_item
+
+    idea = insert_item(kind="memo", raw_text="Idea", ai_category="idea")
+    someday = insert_item(kind="memo", raw_text="Someday", ai_category="someday")
+    insert_item(kind="memo", raw_text="Ordinary", ai_category="memo")
+    insert_item(kind="task", raw_text="Task idea", ai_category="idea")
+    with sqlite3.connect(database) as setup:
+        setup.execute(
+            "INSERT INTO goals(title, created_at, updated_at) VALUES ('Map','now','now')"
+        )
+        setup.execute("UPDATE items SET goal_id=1 WHERE id=?", (idea,))
+
+    assert [row["id"] for row in fetch_seeds()] == [someday]
+
+
+def test_restore_drops_goal_link_when_goal_no_longer_exists(monkeypatch, tmp_path) -> None:
+    database = tmp_path / "trash-missing-goal.db"
+    monkeypatch.setenv("DB_PATH", str(database))
+    init_db()
+    with sqlite3.connect(database) as setup:
+        setup.execute(
+            "INSERT INTO goals (title, created_at, updated_at) VALUES (?, ?, ?)",
+            ("Temporary", "2026-10-22T00:00:00", "2026-10-22T00:00:00"),
+        )
+    task_id = insert_task("Task", goal_id=1)
+    delete_item(task_id)
+    trash_id = list_trashed_items()[0]["id"]
+    with sqlite3.connect(database) as setup:
+        setup.execute("DELETE FROM goals WHERE id = 1")
+
+    restored = fetch_item(restore_trashed_item(trash_id))
+
+    assert restored is not None
+    assert restored["goal_id"] is None
+
+
+def test_restore_does_not_reuse_another_deleted_tasks_calendar_id(monkeypatch, tmp_path) -> None:
+    database = tmp_path / "trash-calendar-id.db"
+    monkeypatch.setenv("DB_PATH", str(database))
+    init_db()
+    first = insert_task("First")
+    second = insert_task("Second")
+    with sqlite3.connect(database) as setup:
+        setup.execute(
+            "INSERT INTO calendar_task_sync (task_id, event_id) VALUES (?, ?)",
+            (second, "event-b"),
+        )
+
+    delete_item(first)
+    first_trash_id = next(
+        row["id"] for row in list_trashed_items() if row["original_item_id"] == first
+    )
+    delete_item(second)
+
+    restored = restore_trashed_item(first_trash_id)
+
+    assert restored > second
+    with sqlite3.connect(database) as check:
+        assert check.execute(
+            "SELECT event_id FROM calendar_task_sync WHERE task_id = ?", (second,)
+        ).fetchone()[0] == "event-b"
+        assert check.execute(
+            "SELECT operation FROM calendar_sync_outbox WHERE task_id = ?", (second,)
+        ).fetchone()[0] == "delete"
+        assert check.execute(
+            "SELECT operation FROM calendar_sync_outbox WHERE task_id = ?", (restored,)
+        ).fetchone()[0] == "upsert"
+
+
 def test_recurring_task_creates_the_next_occurrence_on_completion(monkeypatch, tmp_path) -> None:
     database = tmp_path / "recurrence.db"
     monkeypatch.setenv("DB_PATH", str(database))
@@ -260,7 +461,7 @@ def test_v15_recurrence_migration_preserves_rules(monkeypatch, tmp_path) -> None
     init_db()
     init_db()
     with sqlite3.connect(database) as check:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 16
+        assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 18
         assert (
             check.execute(
                 "SELECT id, frequency, interval_days, end_date, active, created_at FROM task_recurrence_rules ORDER BY id"

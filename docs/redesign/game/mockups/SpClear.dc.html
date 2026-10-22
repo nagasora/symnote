@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>スマホ クエストクリア</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@500;700;800&amp;family=Zen+Maru+Gothic:wght@500;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#1C6AA6}a:hover{color:#134d7a}
+.sn{font-family:"Zen Maru Gothic","Hiragino Maru Gothic ProN",system-ui,sans-serif;color:#3B2A20;background:#FFF6E6;font-weight:500}
+.h{font-family:"M PLUS Rounded 1c","Hiragino Maru Gothic ProN",system-ui,sans-serif;font-weight:800;letter-spacing:.01em}
+.num{font-family:"M PLUS Rounded 1c","Hiragino Maru Gothic ProN",system-ui,sans-serif;font-weight:800;font-variant-numeric:tabular-nums}
+.card{background:#FFFFFF;border:2px solid #F0DFC2;border-radius:20px;box-shadow:0 4px 0 #F0DFC2}
+.btn{font:inherit;font-weight:700;font-size:16px;border:0;border-radius:16px;min-height:52px;padding:0 18px;display:inline-flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;color:#3B2A20;text-decoration:none}
+.btn-sun{background:#FFC23D;box-shadow:0 4px 0 #E09A00}
+.btn-ghost{background:#FFFFFF;border:2px solid #F0DFC2;box-shadow:0 4px 0 #F0DFC2}
+.chip{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 10px;border-radius:999px;font-size:12px;font-weight:700;white-space:nowrap}
+.c-xp{background:#E3F6E9;color:#1F7A44}
+.c-coin{background:#FFF0C7;color:#8A5A00}
+.bar{height:16px;border-radius:999px;background:#F3E6CF;overflow:hidden;position:relative}
+.bar-fill{display:block;height:100%;background:#4CB872;border-radius:999px;box-shadow:inset 0 -4px 0 rgba(0,0,0,.12)}
+.ico{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.faint{color:#7A6555}
+.cf{position:absolute;width:10px;height:16px;border-radius:3px}
+</style>
+</helmet>
+<div class="sn" style="width: 390px; height: 844px; position: relative; overflow: hidden; background: #FFF1D6;">
+  <div class="cf" style="left: 40px; top: 70px; background: #FF7A66; transform: rotate(-20deg);"></div>
+  <div class="cf" style="left: 92px; top: 130px; background: #5AB8F5; transform: rotate(30deg);"></div>
+  <div class="cf" style="left: 300px; top: 64px; background: #4CB872; transform: rotate(15deg);"></div>
+  <div class="cf" style="left: 336px; top: 150px; background: #9C7BF2; transform: rotate(-35deg);"></div>
+  <div class="cf" style="left: 250px; top: 108px; background: #FFC23D; transform: rotate(50deg);"></div>
+  <div class="cf" style="left: 150px; top: 46px; background: #9C7BF2; transform: rotate(-60deg);"></div>
+  <div class="cf" style="left: 58px; top: 220px; background: #FFC23D; transform: rotate(20deg);"></div>
+  <div class="cf" style="left: 320px; top: 240px; background: #FF7A66; transform: rotate(-10deg);"></div>
+
+  <div style="box-sizing: border-box; height: 100%; padding: 96px 20px 36px; display: flex; flex-direction: column; align-items: center; gap: 18px; position: relative;">
+    <div style="width: 112px; height: 112px; border-radius: 36px; background: #4CB872; box-shadow: 0 8px 0 #2E8A50, 0 0 0 12px rgba(76,184,114,.22); display: flex; align-items: center; justify-content: center; color: #FFFFFF;">
+      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 64px; height: 64px; stroke-width: 3.2;"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>
+    </div>
+    <h1 class="h" style="margin: 10px 0 0; font-size: 34px;">クエストクリア！</h1>
+    <p style="margin: 0; font-size: 16px; font-weight: 700;">英語の論文を1本要約する</p>
+
+    <div style="display: flex; gap: 12px;">
+      <div class="card" style="padding: 12px 22px; display: flex; flex-direction: column; align-items: center;"><span class="num" style="font-size: 32px; color: #1F7A44;">+21</span><span class="faint" style="font-size: 12px; font-weight: 700;">XP</span></div>
+      <div class="card" style="padding: 12px 22px; display: flex; flex-direction: column; align-items: center;"><span class="num" style="font-size: 32px; color: #8A5A00;">+11</span><span class="faint" style="font-size: 12px; font-weight: 700;">ゴールド</span></div>
+    </div>
+    <div style="display: flex; gap: 6px;"><span class="chip c-xp">期限内クリア +30%</span><span class="chip c-coin">朝の一歩</span></div>
+
+    <div class="card" style="align-self: stretch; padding: 16px; display: flex; flex-direction: column; gap: 10px;">
+      <div style="display: flex; justify-content: space-between; font-size: 13px;"><b class="num">Lv 7 → あと 41 XP で Lv 8</b><span class="num faint">159 / 200</span></div>
+      <div class="bar"><span class="bar-fill" style="width: 80%;"></span></div>
+      <div style="display: flex; align-items: center; gap: 10px; font-size: 13px;">
+        <svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><rect x="3" y="9" width="18" height="11" rx="2.5" fill="#FFC23D" stroke="#8A5A00" stroke-width="1.8"></rect><path d="M5 9a7 5 0 0 1 14 0" fill="#FFD36B" stroke="#8A5A00" stroke-width="1.8"></path><rect x="10.5" y="11" width="3" height="4" rx="1" fill="#8A5A00"></rect></svg>
+        <b>宝箱まであと 2つ</b><span class="num faint" style="margin-left: auto;">3 / 5</span>
+      </div>
+    </div>
+
+    <div style="align-self: stretch; display: flex; gap: 10px; align-items: center;">
+      <svg viewBox="0 0 64 64" width="52" height="52" aria-hidden="true" style="flex: none;"><ellipse cx="25" cy="12" rx="8" ry="4.5" transform="rotate(-30 25 12)" fill="#4CB872"></ellipse><ellipse cx="39" cy="12" rx="8" ry="4.5" transform="rotate(30 39 12)" fill="#4CB872"></ellipse><rect x="31" y="12" width="2.4" height="9" rx="1.2" fill="#2E8A50"></rect><ellipse cx="32" cy="40" rx="24" ry="21" fill="#FFD36B" stroke="#E09A00" stroke-width="2"></ellipse><path d="M20 39q4-5 8 0M36 39q4-5 8 0" stroke="#3B2A20" stroke-width="2.6" fill="none" stroke-linecap="round"></path><ellipse cx="17" cy="46" rx="4" ry="2.5" fill="#FF9E8A"></ellipse><ellipse cx="47" cy="46" rx="4" ry="2.5" fill="#FF9E8A"></ellipse><path d="M27 45q5 7 10 0z" fill="#3B2A20"></path></svg>
+      <div style="flex: 1; background: #FFFFFF; border: 2px solid #F0DFC2; border-radius: 16px; padding: 10px 14px; font-size: 14px; line-height: 1.6;">ナイス！つぎは大物の<b>スライド</b>。3つに小分けしておいたよ。</div>
+    </div>
+
+    <div style="margin-top: auto; align-self: stretch; display: flex; flex-direction: column; gap: 12px;">
+      <button class="btn btn-sun" type="button">つぎのクエストへ</button>
+      <div style="display: flex; gap: 10px;"><button class="btn btn-ghost" type="button" style="flex: 1;">ひと休み</button><button class="btn btn-ghost" type="button" style="flex: 1;">元に戻す</button></div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

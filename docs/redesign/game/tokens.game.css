@@ -1,0 +1,115 @@
+/*
+ * SymNote デザイントークン（方向性「ひだまりの冒険」2026-10-22）
+ *
+ * web/src/styles/tokens.css をこの内容で置き換える。
+ * 色は必ずこの変数を通す（16 進の直書き禁止。ダークモードをここに集約するため）。
+ * 文字色は WCAG AA（本文 4.5:1）を満たす組み合わせだけを定義している。
+ *   - 色付きの面（--sun など）の上の文字は --ink（ココア）。白文字は使わない。
+ *   - 色付きの文字は *-ink、その背景は *-soft と組で使う。
+ */
+
+:root,
+[data-theme="light"] {
+  /* 地と面 */
+  --bg: #fff6e6;            /* はちみつミルク */
+  --surface: #ffffff;       /* カード */
+  --surface-2: #fffbf3;     /* 持ち越し・入力欄の地 */
+  --surface-sunk: #f3e6cf;  /* セグメントの溝・バーの溝 */
+  --line: #f0dfc2;          /* カードの枠と「厚み」の影 */
+  --line-strong: #e6d3b3;   /* チェック枠など */
+
+  /* 文字（ココア） */
+  --ink: #3b2a20;
+  --ink-2: #6b5546;
+  --ink-3: #7a6555;         /* もっとも淡い読ませる文字 */
+  --ink-4: #b9a58f;         /* 装飾・無効のみ */
+
+  /* 意味の決まった 5 色。面 / 押し込み影 / 文字 / 淡い地 */
+  --sun: #ffc23d;   --sun-deep: #e09a00;   --sun-ink: #8a5a00;   --sun-soft: #fff0c7;   /* 主ボタン・ゴールド・つぎの一手 */
+  --leaf: #4cb872;  --leaf-deep: #2e8a50;  --leaf-ink: #1f7a44;  --leaf-soft: #e3f6e9;  /* クリア・XP */
+  --sky: #5ab8f5;   --sky-deep: #2e8bcb;   --sky-ink: #1c6aa6;   --sky-soft: #e2f2fd;   /* 予定・時刻・マップ進捗 */
+  --berry: #ff7a66; --berry-deep: #d9533f; --berry-ink: #b53a28; --berry-soft: #ffe6e1; /* 大物・重要・連続記録 */
+  --grape: #9c7bf2; --grape-deep: #7556d6; --grape-ink: #6045c2; --grape-soft: #eee8ff; /* たね・マップ名 */
+
+  /* 相棒（ミナ）の体色 */
+  --buddy-body: #ffd36b;
+  --buddy-cheek: #ff9e8a;
+
+  /* 厚み（ゲームのボタン感）。押下時は translateY(var(--press)) と影 0 */
+  --press: 4px;
+  --lift-card: 0 4px 0 var(--line);
+  --lift-sun: 0 4px 0 var(--sun-deep);
+  --lift-leaf: 0 3px 0 var(--leaf-deep);
+  --backdrop: rgba(59, 42, 32, 0.42);
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  /* 夜のキャンプ：黒ではなく焦げたココア */
+  --bg: #221b16;
+  --surface: #2e251f;
+  --surface-2: #2a221c;
+  --surface-sunk: #3a2f27;
+  --line: #4a3c31;
+  --line-strong: #5c4b3e;
+
+  --ink: #fbefdd;
+  --ink-2: #dcc8b2;
+  --ink-3: #bfa992;
+  --ink-4: #7d6a5a;
+
+  --sun: #ffc23d;   --sun-deep: #b87f00;   --sun-ink: #ffd36b;   --sun-soft: #3d3016;
+  --leaf: #4cb872;  --leaf-deep: #2a7a47;  --leaf-ink: #8fe0aa;  --leaf-soft: #1f3527;
+  --sky: #5ab8f5;   --sky-deep: #2a7cb5;   --sky-ink: #9ed6fb;   --sky-soft: #1b2f3d;
+  --berry: #ff7a66; --berry-deep: #c4483a; --berry-ink: #ffb3a6; --berry-soft: #3d2420;
+  --grape: #9c7bf2; --grape-deep: #6a4fc4; --grape-ink: #cbb9ff; --grape-soft: #2c2440;
+
+  --buddy-body: #ffd36b;
+  --buddy-cheek: #ff9e8a;
+
+  --lift-card: 0 4px 0 #17120e;
+  --lift-sun: 0 4px 0 var(--sun-deep);
+  --lift-leaf: 0 3px 0 var(--leaf-deep);
+  --backdrop: rgba(0, 0, 0, 0.55);
+  color-scheme: dark;
+}
+
+:root {
+  /* 文字：見出しと数字は M PLUS Rounded 1c、本文は Zen Maru Gothic（@fontsource で同梱） */
+  --font-display: "M PLUS Rounded 1c", "Hiragino Maru Gothic ProN", system-ui, sans-serif;
+  --font-body: "Zen Maru Gothic", "Hiragino Maru Gothic ProN", system-ui, sans-serif;
+
+  --text-xs: 0.75rem;    /* 12 チップ・ラベル */
+  --text-sm: 0.8125rem;  /* 13 メタ */
+  --text-md: 0.9375rem;  /* 15 本文・クエスト名 */
+  --text-lg: 1.125rem;   /* 18 セクション見出し */
+  --text-xl: 1.625rem;   /* 26 つぎの一手・スマホ画面見出し */
+  --text-2xl: 2.25rem;   /* 36 PC 画面見出し */
+  --text-hero: 2.125rem; /* 34 クリア演出 */
+
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 20px;
+  --sp-6: 24px; --sp-8: 32px; --sp-10: 40px; --sp-12: 48px;
+
+  --r-chip: 999px;
+  --r-sm: 12px;   /* 小ボタン・吹き出し内 */
+  --r-md: 16px;   /* ボタン・入力 */
+  --r-lg: 20px;   /* カード */
+  --r-sheet: 28px;
+
+  --ease-pop: cubic-bezier(0.34, 1.56, 0.64, 1); /* チェック・XP の弾み */
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-1: 120ms;  /* 押下 */
+  --dur-2: 240ms;  /* チェックの弾み */
+  --dur-3: 360ms;  /* シート・バーの伸び */
+  --dur-cele: 900ms; /* クリア演出の紙吹雪 */
+
+  --sidebar-w: 240px;
+  --rail-w: 340px;
+  --content-max: 760px;
+  --tabbar-h: 64px;
+  --touch-min: 44px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-1: 0ms; --dur-2: 0ms; --dur-3: 0ms; --dur-cele: 0ms; }
+}

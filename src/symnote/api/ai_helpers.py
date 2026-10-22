@@ -62,6 +62,7 @@ def _rule_based_brain_dump_split(
         items.append(
             {
                 "title": title[:200],
+                "kind": "seed" if line.startswith(("たね:", "たね：", "アイデア:", "アイデア：")) or line.endswith(("したい", "作りたい")) else parsed.kind,
                 "details": "",
                 "due_date": parsed.due_date or today.isoformat(),
                 "due_time": parsed.due_time,
@@ -91,6 +92,7 @@ def split_brain_dump(
             "JSON 配列のみで返してください。\n"
             "各要素は次のキーを持つオブジェクトにしてください:\n"
             '- "title": 動詞で終わる具体的な行動タイトル（40文字以内）\n'
+            '- "kind": 行動は "task"、育てたいアイデアは "seed"、記録は "memo"\n'
             '- "details": 補足メモ（不要なら空文字）\n'
             '- "due_date": 期限日 "YYYY-MM-DD"（今日やるべきなら今日の年月日、不明なら null）\n'
             '- "due_time": 時刻 "HH:MM"（不明なら null）\n'
@@ -118,6 +120,7 @@ def split_brain_dump(
                 normalized.append(
                     {
                         "title": raw_title[:200],
+                        "kind": entry.get("kind") if entry.get("kind") in {"task", "seed", "memo"} else fallback.kind,
                         "details": str(entry.get("details") or "")[:1000],
                         "due_date": str(due_date) if due_date else today.isoformat(),
                         "due_time": str(due_time) if due_time else None,

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 ItemRow = Dict[str, Any]
 SQLITE_BUSY_TIMEOUT_MS = 5_000
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 18
 
 
 @contextmanager
@@ -436,6 +436,62 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
         conn.execute("DROP TABLE task_recurrence_rules")
         conn.execute("ALTER TABLE task_recurrence_rules_v16 RENAME TO task_recurrence_rules")
         conn.execute("PRAGMA user_version = 16")
+        current = 16
+    if current < 17:
+        # Deletion stays recoverable without changing the active items schema.
+        # Keep a full item snapshot so future item columns can be restored by a
+        # later migration without reviving external bindings or recurrence.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS item_trash (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              original_item_id INTEGER NOT NULL,
+              created_at TEXT,
+              date TEXT,
+              due_date TEXT,
+              due_time TEXT,
+              kind TEXT,
+              raw_text TEXT,
+              ai_category TEXT,
+              importance INTEGER,
+              urgency INTEGER,
+              effort TEXT,
+              energy TEXT,
+              status TEXT,
+              tags TEXT,
+              embedding BLOB,
+              recurrence_rule_id INTEGER,
+              goal_id INTEGER,
+              estimate_minutes INTEGER,
+              completed_at TEXT,
+              delegated_to TEXT,
+              deleted_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_item_trash_deleted ON item_trash(deleted_at)")
+        conn.execute("PRAGMA user_version = 17")
+        current = 17
+    if current < 18:
+        # Bonuses outside normal task completion use a separate idempotency log.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS quest_bonus_log (
+              id INTEGER PRIMARY KEY,
+              kind TEXT NOT NULL CHECK(kind IN ('daily_clear', 'triage')),
+              ref TEXT NOT NULL,
+              xp INTEGER NOT NULL CHECK(xp >= 0),
+              gold INTEGER NOT NULL CHECK(gold >= 0),
+              created_at TEXT NOT NULL,
+              seen INTEGER NOT NULL DEFAULT 0,
+              UNIQUE(kind, ref)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_quest_bonus_created ON quest_bonus_log(created_at)"
+        )
+        conn.execute("PRAGMA user_version = 18")
 
 
 def init_db() -> None:
@@ -1120,6 +1176,9 @@ def detach_goal_references(conn: sqlite3.Connection, goal_ids: Sequence[int]) ->
         [now, *goal_ids],
     )
     conn.execute(f"UPDATE agent_reports SET goal_id = -goal_id WHERE goal_id IN ({marks})", list(goal_ids))
+    # Trashed snapshots outlive goals. Clear their association before SQLite can
+    # reuse a deleted goal ID for an unrelated goal.
+    conn.execute(f"UPDATE item_trash SET goal_id = NULL WHERE goal_id IN ({marks})", list(goal_ids))
 
 
 def _delete_item_in_transaction(conn: sqlite3.Connection, item_id: int) -> None:
@@ -1143,9 +1202,151 @@ def _delete_item_in_transaction(conn: sqlite3.Connection, item_id: int) -> None:
 
 
 def delete_item(item_id: int) -> None:
-    """アイテムを削除する。"""
+    """アイテムを復元可能なスナップショットへ退避してから削除する。"""
     with connection() as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+        if row is None:
+            return
+        conn.execute(
+            """
+            INSERT INTO item_trash (
+              original_item_id, created_at, date, due_date, due_time, kind, raw_text,
+              ai_category, importance, urgency, effort, energy, status, tags, embedding,
+              recurrence_rule_id, goal_id, estimate_minutes, completed_at, delegated_to,
+              deleted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item_id,
+                row["created_at"],
+                row["date"],
+                row["due_date"],
+                row["due_time"],
+                row["kind"],
+                row["raw_text"],
+                row["ai_category"],
+                row["importance"],
+                row["urgency"],
+                row["effort"],
+                row["energy"],
+                row["status"],
+                row["tags"],
+                row["embedding"],
+                row["recurrence_rule_id"],
+                row["goal_id"],
+                row["estimate_minutes"],
+                row["completed_at"],
+                row["delegated_to"],
+                dt.datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
         _delete_item_in_transaction(conn, item_id)
+
+
+def list_trashed_items() -> List[ItemRow]:
+    """削除済みアイテムを新しい順で返す。``id`` はゴミ箱行の ID。"""
+    with connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM item_trash ORDER BY deleted_at DESC, id DESC"
+        ).fetchall()
+    items = [dict(row) for row in rows]
+    for item in items:
+        raw_lines = str(item.get("raw_text") or "").strip().splitlines()
+        fallback = raw_lines[0].strip() if raw_lines else f"アイテム #{item['original_item_id']}"
+        item["title"] = str(item.get("tags") or "").strip() or fallback
+    return items
+
+
+_RESTORE_ITEM_COLUMNS = """
+  created_at, date, due_date, due_time, kind, raw_text, ai_category,
+  importance, urgency, effort, energy, status, tags, embedding,
+  recurrence_rule_id, goal_id, estimate_minutes, completed_at, delegated_to
+"""
+
+
+def restore_trashed_item(trash_id: int) -> int:
+    """ゴミ箱のスナップショットを新しい item ID で復元し、その ID を返す。"""
+    from symnote.core import postgres
+
+    with connection() as conn, conn:
+        # SQLite と PostgreSQL のどちらでも、同じゴミ箱行の同時復元を直列化する。
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM item_trash WHERE id = ?", (trash_id,)).fetchone()
+        if row is None:
+            raise LookupError(f"ゴミ箱アイテム {trash_id} は存在しません。")
+
+        goal_id = row["goal_id"]
+        if goal_id is not None:
+            goal = conn.execute("SELECT 1 FROM goals WHERE id = ?", (goal_id,)).fetchone()
+            if goal is None:
+                goal_id = None
+
+        values = (
+            row["created_at"],
+            row["date"],
+            row["due_date"],
+            row["due_time"],
+            row["kind"],
+            row["raw_text"],
+            row["ai_category"],
+            row["importance"],
+            row["urgency"],
+            row["effort"],
+            row["energy"],
+            row["status"],
+            row["tags"],
+            row["embedding"],
+            None,
+            goal_id,
+            row["estimate_minutes"],
+            row["completed_at"],
+            row["delegated_to"],
+        )
+        placeholders = ", ".join("?" for _ in values)
+        if postgres.enabled():
+            restored = conn.execute(
+                f"INSERT INTO items ({_RESTORE_ITEM_COLUMNS}) VALUES ({placeholders})",
+                values,
+            )
+            new_item_id = int(restored.lastrowid)
+            # Identity sequences normally make this impossible, but retain the
+            # new-ID contract even after an administrator resets a sequence.
+            if new_item_id == int(row["original_item_id"]):
+                conn.execute("DELETE FROM items WHERE id = ?", (new_item_id,))
+                restored = conn.execute(
+                    f"INSERT INTO items ({_RESTORE_ITEM_COLUMNS}) VALUES ({placeholders})",
+                    values,
+                )
+                new_item_id = int(restored.lastrowid)
+        else:
+            # Deleted task IDs remain in Calendar state until their remote
+            # events are deleted. Treat every retained reference as reserved so
+            # a restored item cannot inherit another task's event mapping or
+            # replace its pending delete with an upsert.
+            next_row = conn.execute(
+                """
+                SELECT COALESCE(MAX(reserved_id), 0) + 1
+                FROM (
+                  SELECT id AS reserved_id FROM items
+                  UNION ALL SELECT original_item_id FROM item_trash
+                  UNION ALL SELECT task_id FROM calendar_task_sync
+                  UNION ALL SELECT task_id FROM calendar_sync_outbox
+                ) AS reserved_item_ids
+                """
+            ).fetchone()
+            new_item_id = max(int(next_row[0]), int(row["original_item_id"]) + 1)
+            conn.execute(
+                f"INSERT INTO items (id, {_RESTORE_ITEM_COLUMNS}) VALUES (?, {placeholders})",
+                (new_item_id, *values),
+            )
+
+        if new_item_id == int(row["original_item_id"]):
+            raise RuntimeError("復元先に新しい item ID を割り当てられませんでした。")
+        conn.execute("DELETE FROM item_trash WHERE id = ?", (trash_id,))
+        if row["kind"] == "task":
+            _queue_calendar_sync(conn, new_item_id, "upsert")
+        return new_item_id
 
 
 _ITEM_WITH_RECURRENCE_SELECT = """
@@ -1200,6 +1401,24 @@ def fetch_memos(limit: int = 100) -> List[ItemRow]:
             (limit,),
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def fetch_seeds(limit: int = 100) -> List[ItemRow]:
+    """Return unadopted idea/someday memos in newest-first order."""
+    with connection() as conn:
+        cur = conn.execute(
+            """
+            SELECT id, created_at, date, raw_text, tags, ai_category, status, goal_id
+            FROM items
+            WHERE kind = 'memo'
+              AND ai_category IN ('idea', 'someday')
+              AND goal_id IS NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit), 200)),),
+        )
+        return [dict(row) for row in cur.fetchall()]
 
 
 def fetch_tasks(

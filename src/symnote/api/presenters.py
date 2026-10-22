@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import asdict
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from symnote.core.db import fetch_task_sources, recurrence_label
@@ -55,8 +56,10 @@ def present_task(
     g_titles = goal_titles if goal_titles is not None else {}
     src_map = sources if sources is not None else {}
     rec = _recurrence_dict(row)
+    from symnote.core.quest import quest_preview
     return {
         "id": task_id,
+        "quest": asdict(quest_preview(row, dt.datetime.now())) if row.get("status") != "done" else None,
         "kind": "task",
         "title": title,
         "details": details,
@@ -79,7 +82,8 @@ def present_task(
         "delegated_to": row.get("delegated_to"),
         "recurrence_label": rec["label"] if rec else None,
         "recurrence": rec,
-        "source": src_map.get(task_id),
+        "source": ({**src_map[task_id], "type": src_map[task_id].get("source", "other")}
+                   if task_id in src_map else None),
     }
 
 
@@ -104,6 +108,7 @@ def present_memo(row: Mapping[str, Any]) -> Dict[str, Any]:
         "title": title,
         "body": body,
         "text": str(row.get("raw_text") or ""),
+        "raw_text": str(row.get("raw_text") or ""),
         "tags": tag_list,
         "tags_text": raw_tags,
         "date": row.get("date"),
@@ -117,6 +122,7 @@ def present_candidate(row: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "id": int(row["id"]),
         "source": str(row.get("source") or "other"),
+        "source_type": str(row.get("source") or "other"),
         "source_ref": str(row.get("source_ref") or ""),
         "source_url": row.get("source_url"),
         "title": str(row.get("title") or ""),

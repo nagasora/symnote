@@ -1,0 +1,92 @@
+* {
+  box-sizing: border-box;
+}
+html {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-weight: 500;
+  min-width: 320px;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  min-height: 100vh;
+}
+.auth-wrap {
+  min-height: calc(100dvh - 56px);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.auth-card {
+  padding: 24px;
+}
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+button,
+a {
+  touch-action: manipulation;
+}
+button {
+  cursor: pointer;
+}
+a {
+  color: var(--sky-ink);
+}
+h1,
+h2,
+h3,
+strong,
+.num {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+}
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+input,
+textarea,
+select {
+  background: var(--surface-2);
+  border: 2px solid var(--line-strong);
+  border-radius: var(--r-md);
+  min-height: 48px;
+  padding: 10px 13px;
+  outline: none;
+  width: 100%;
+}
+textarea {
+  resize: vertical;
+  line-height: 1.7;
+}
+input:focus,
+textarea:focus,
+select:focus,
+button:focus-visible,
+a:focus-visible {
+  outline: 3px solid var(--sky);
+  outline-offset: 2px;
+}
+svg {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.muted-copy {
+  color: var(--ink-3);
+  font-size: var(--text-sm);
+  line-height: 1.7;
+}
+.screen-loading {
+  padding: 64px;
+  text-align: center;
+  color: var(--ink-2);
+}

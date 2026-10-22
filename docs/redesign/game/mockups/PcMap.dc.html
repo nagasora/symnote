@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>PC 冒険マップとたね</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@500;700;800&amp;family=Zen+Maru+Gothic:wght@500;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#1C6AA6}a:hover{color:#134d7a}
+.sn{font-family:"Zen Maru Gothic","Hiragino Maru Gothic ProN",system-ui,sans-serif;color:#3B2A20;background:#FFF6E6;font-weight:500}
+.h{font-family:"M PLUS Rounded 1c","Hiragino Maru Gothic ProN",system-ui,sans-serif;font-weight:800;letter-spacing:.01em}
+.num{font-family:"M PLUS Rounded 1c","Hiragino Maru Gothic ProN",system-ui,sans-serif;font-weight:800;font-variant-numeric:tabular-nums}
+.card{background:#FFFFFF;border:2px solid #F0DFC2;border-radius:20px;box-shadow:0 4px 0 #F0DFC2}
+.btn{font:inherit;font-weight:700;font-size:15px;border:0;border-radius:16px;min-height:48px;padding:0 20px;display:inline-flex;align-items:center;justify-content:center;gap:8px;cursor:pointer;color:#3B2A20;text-decoration:none}
+.btn-sun{background:#FFC23D;box-shadow:0 4px 0 #E09A00}
+.btn-ghost{background:#FFFFFF;border:2px solid #F0DFC2;box-shadow:0 4px 0 #F0DFC2}
+.btn-sm{min-height:44px;font-size:14px;padding:0 14px;border-radius:14px}
+.chip{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 10px;border-radius:999px;font-size:12px;font-weight:700;white-space:nowrap}
+.c-xp{background:#E3F6E9;color:#1F7A44}
+.c-coin{background:#FFF0C7;color:#8A5A00}
+.c-sky{background:#E2F2FD;color:#1C6AA6}
+.c-berry{background:#FFE6E1;color:#B53A28}
+.c-grape{background:#EEE8FF;color:#6045C2}
+.c-plain{background:#FFF0D6;color:#6B5546}
+.bar{height:14px;border-radius:999px;background:#F3E6CF;overflow:hidden}
+.bar-fill{display:block;height:100%;background:#5AB8F5;border-radius:999px;box-shadow:inset 0 -4px 0 rgba(0,0,0,.12)}
+.ico{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.muted{color:#6B5546}
+.faint{color:#7A6555}
+.nav{display:flex;align-items:center;gap:12px;height:48px;padding:0 14px;border-radius:14px;font-weight:700;font-size:15px;color:#3B2A20;text-decoration:none}
+.nav-on{background:#FFFFFF;border:2px solid #F0DFC2;box-shadow:0 3px 0 #F0DFC2}
+.label{font-size:12px;font-weight:700;color:#7A6555;letter-spacing:.06em}
+.node{width:64px;height:64px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:none;border:0;padding:0;cursor:pointer}
+.n-done{background:#4CB872;box-shadow:0 5px 0 #2E8A50;color:#FFFFFF}
+.n-now{background:#FFC23D;box-shadow:0 5px 0 #E09A00,0 0 0 8px rgba(255,194,61,.28);color:#3B2A20}
+.n-lock{background:#EFE3CF;box-shadow:0 5px 0 #DCCAB0;color:#7A6555}
+.stage{display:flex;align-items:center;gap:10px;background:#FFFFFF;border:2px solid #F0DFC2;border-radius:999px;padding:6px 16px 6px 6px;font-weight:700;font-size:14px}
+.mapitem{display:flex;flex-direction:column;gap:8px;padding:14px 16px;border-radius:16px;text-decoration:none;color:#3B2A20}
+.seed{display:flex;align-items:center;gap:12px;padding:12px 14px}
+.seed+.seed{border-top:2px dashed #F0DFC2}
+</style>
+</helmet>
+<div class="sn" style="width: 1440px; height: 960px; display: flex; overflow: hidden;">
+
+  <nav aria-label="メイン" style="width: 240px; flex: none; box-sizing: border-box; padding: 24px 16px; display: flex; flex-direction: column; gap: 6px; border-right: 2px solid #F0DFC2;">
+    <div style="display: flex; align-items: center; gap: 10px; padding: 0 8px 18px;">
+      <svg viewBox="0 0 64 64" width="36" height="36" aria-hidden="true"><ellipse cx="25" cy="12" rx="8" ry="4.5" transform="rotate(-30 25 12)" fill="#4CB872"></ellipse><ellipse cx="39" cy="12" rx="8" ry="4.5" transform="rotate(30 39 12)" fill="#4CB872"></ellipse><ellipse cx="32" cy="40" rx="24" ry="21" fill="#FFD36B" stroke="#E09A00" stroke-width="2"></ellipse><ellipse cx="24" cy="38" rx="3" ry="4" fill="#3B2A20"></ellipse><ellipse cx="40" cy="38" rx="3" ry="4" fill="#3B2A20"></ellipse><path d="M28 46q4 4 8 0" stroke="#3B2A20" stroke-width="2.5" fill="none" stroke-linecap="round"></path></svg>
+      <span class="h" style="font-size: 22px;">SymNote</span>
+    </div>
+    <button class="btn btn-sun" type="button" style="justify-content: flex-start; margin-bottom: 14px;"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>ミナに渡す<span class="num" style="margin-left: auto; font-size: 12px; opacity: .7;">⌘K</span></button>
+    <a class="nav" href="#today"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="color: #E09A00;"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>きょうの冒険<span class="num" style="margin-left: auto; font-size: 13px;">3</span></a>
+    <a class="nav nav-on" href="#map"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="color: #2E8BCB;"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2zM9 4v14M15 6v14"></path></svg>冒険マップ</a>
+    <a class="nav" href="#board"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="color: #D9533F;"><rect x="5" y="4" width="14" height="17" rx="2"></rect><path d="M9 4V2.5h6V4M9 10h6M9 14h4"></path></svg>依頼ボード<span class="chip c-berry num" style="margin-left: auto;">4</span></a>
+    <a class="nav" href="#me"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="color: #7556D6;"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c1-4 4-6 8-6s7 2 8 6"></path></svg>じぶん</a>
+  </nav>
+
+  <div style="width: 300px; flex: none; box-sizing: border-box; padding: 36px 20px; display: flex; flex-direction: column; gap: 14px; border-right: 2px solid #F0DFC2;">
+    <h1 class="h" style="margin: 0 0 6px; font-size: 28px;">冒険マップ</h1>
+    <div style="display: flex; gap: 6px; background: #F3E6CF; border-radius: 14px; padding: 4px;">
+      <button class="btn btn-sm" type="button" style="flex: 1; background: #FFFFFF; box-shadow: 0 2px 0 #E6D3B3;">マップ</button>
+      <button class="btn btn-sm" type="button" style="flex: 1; background: transparent;">ぜんぶ</button>
+      <button class="btn btn-sm" type="button" style="flex: 1; background: transparent;">予定表</button>
+    </div>
+    <a class="mapitem card" href="#m1" style="border-color: #5AB8F5; box-shadow: 0 4px 0 #2E8BCB;"><b style="font-size: 15px;">ゼミ発表を成功させる</b><div class="bar" style="height: 10px;"><span class="bar-fill" style="width: 60%;"></span></div><span class="faint" style="font-size: 12px;">ステージ 2 / 3 ・ 10月29日まで</span></a>
+    <a class="mapitem card" href="#m2"><b style="font-size: 15px;">英語で論文を書けるようになる</b><div class="bar" style="height: 10px;"><span class="bar-fill" style="width: 15%;"></span></div><span class="faint" style="font-size: 12px;">ステージ 1 / 4 ・ 3月まで</span></a>
+    <a class="mapitem card" href="#m3"><b style="font-size: 15px;">SymNote を友だちに使ってもらう</b><div class="bar" style="height: 10px;"><span class="bar-fill" style="width: 35%;"></span></div><span style="font-size: 12px; color: #8A5A00; font-weight: 700;">5日 ひと休み中</span></a>
+    <button class="btn btn-ghost" type="button" style="margin-top: 4px;"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>新しいマップ</button>
+  </div>
+
+  <main style="flex: 1; min-width: 0; box-sizing: border-box; padding: 36px 40px; display: flex; flex-direction: column; gap: 18px; overflow: hidden;">
+    <header style="display: flex; flex-direction: column; gap: 8px;">
+      <span class="label">なぜ：来年の院試で評価される発表にしたい</span>
+      <h2 class="h" style="margin: 0; font-size: 30px;">ゼミ発表を成功させる</h2>
+      <div style="display: flex; gap: 8px;"><span class="chip c-sky">10月29日まで</span><span class="chip c-plain">できたら：先生から「この方向でOK」と言われる</span></div>
+    </header>
+
+    <div style="position: relative; flex: 1; display: flex; flex-direction: column; gap: 14px; padding-left: 24px;">
+      <div style="position: absolute; left: 115px; top: 20px; bottom: 20px; border-left: 6px dotted #E6D3B3;"></div>
+
+      <div class="stage" style="align-self: flex-start; position: relative;"><span class="chip c-xp">クリア</span>ステージ 1 ・ テーマを決める</div>
+      <div style="display: flex; align-items: center; gap: 16px; position: relative; padding-left: 60px;">
+        <button class="node n-done" type="button" aria-label="クリア済み：先行研究を3本読む"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 28px; height: 28px; stroke-width: 3;"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></button>
+        <span class="faint" style="font-size: 14px;">先行研究を3本読む</span>
+      </div>
+
+      <div class="stage" style="align-self: flex-start; position: relative; border-color: #FFC23D;"><span class="chip c-coin">いまここ</span>ステージ 2 ・ 資料をつくる</div>
+      <div style="display: flex; align-items: center; gap: 16px; position: relative; padding-left: 60px;">
+        <button class="node n-done" type="button" aria-label="クリア済み：構成を決める"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 28px; height: 28px; stroke-width: 3;"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></button>
+        <span class="faint" style="font-size: 14px;">構成を決める</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 16px; position: relative; padding-left: 60px;">
+        <button class="node n-now" type="button" aria-label="いまのクエスト：スライドを仕上げる"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 28px; height: 28px;"><path d="M12 3l2.6 5.6 6 .7-4.5 4.1 1.2 6L12 16.5 6.7 19.4l1.2-6L3.4 9.3l6-.7z" fill="#3B2A20" stroke="none"></path></svg></button>
+        <div class="card" style="flex: 1; max-width: 520px; padding: 14px 18px; display: flex; align-items: center; gap: 12px;">
+          <div style="flex: 1; display: flex; flex-direction: column; gap: 4px;"><b style="font-size: 16px;">スライドを仕上げる</b><div style="display: flex; gap: 6px;"><span class="chip c-berry">大物 ★★★</span><span class="chip c-xp num">+34 XP</span></div></div>
+          <span class="chip c-sky">きょうに入っています</span>
+        </div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 16px; position: relative; padding-left: 60px;">
+        <button class="node n-lock" type="button" aria-label="これから：リハーサルを1回する"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 26px; height: 26px;"><circle cx="12" cy="12" r="3" fill="#7A6555" stroke="none"></circle></svg></button>
+        <span class="muted" style="font-size: 14px;">リハーサルを1回する</span>
+        <button class="btn btn-ghost btn-sm" type="button">きょうに入れる</button>
+      </div>
+
+      <div class="stage" style="align-self: flex-start; position: relative;"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="color: #7A6555; margin-left: 8px;"><rect x="5" y="11" width="14" height="9" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>ステージ 3 ・ 本番と振り返り</div>
+      <div style="display: flex; align-items: center; gap: 16px; position: relative; padding-left: 60px;">
+        <button class="node n-lock" type="button" aria-label="ゴール：発表本番"><svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true"><path d="M6 21V4M6 4h11l-2.5 4L17 12H6" fill="#FF7A66" stroke="#B53A28" stroke-width="1.6" stroke-linejoin="round"></path></svg></button>
+        <span class="muted" style="font-size: 14px;">ゴール：発表本番 10月29日</span>
+      </div>
+    </div>
+  </main>
+
+  <aside aria-label="たね" style="width: 340px; flex: none; box-sizing: border-box; padding: 36px 28px 36px 0; display: flex; flex-direction: column; gap: 16px;">
+    <div style="display: flex; align-items: center; gap: 10px;">
+      <svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="color: #7556D6; width: 24px; height: 24px;"><path d="M12 21v-9M12 12c0-4-3-6-7-6 0 4 3 6 7 6zM12 10c0-3 2-5 6-5 0 3-2 5-6 5z"></path></svg>
+      <h2 class="h" style="margin: 0; font-size: 20px;">たね</h2>
+      <span class="num faint" style="font-size: 14px;">4</span>
+    </div>
+    <p class="muted" style="margin: 0; font-size: 14px; line-height: 1.7;">思いつきはここに。育てたくなったら、ミナが3つ質問して地図にするよ。</p>
+    <div class="card">
+      <div class="seed"><div style="flex: 1; display: flex; flex-direction: column; gap: 2px;"><b style="font-size: 15px;">毎朝30分 英語を読む習慣</b><span class="faint" style="font-size: 12px;">3日前</span></div><button class="btn btn-sm" type="button" style="background: #EEE8FF; color: #6045C2; box-shadow: 0 3px 0 #D6CBFA;">育てる</button></div>
+      <div class="seed"><div style="flex: 1; display: flex; flex-direction: column; gap: 2px;"><b style="font-size: 15px;">ゼミの議事録を自動でまとめたい</b><span class="faint" style="font-size: 12px;">Slack から ・ 1週間前</span></div><button class="btn btn-sm" type="button" style="background: #EEE8FF; color: #6045C2; box-shadow: 0 3px 0 #D6CBFA;">育てる</button></div>
+      <div class="seed"><div style="flex: 1; display: flex; flex-direction: column; gap: 2px;"><b style="font-size: 15px;">冬休みに台湾へ行く</b><span class="faint" style="font-size: 12px;">2週間前</span></div><button class="btn btn-sm" type="button" style="background: #EEE8FF; color: #6045C2; box-shadow: 0 3px 0 #D6CBFA;">育てる</button></div>
+      <div class="seed"><div style="flex: 1; display: flex; flex-direction: column; gap: 2px;"><b style="font-size: 15px;">ポートフォリオサイトを作る</b><span class="faint" style="font-size: 12px;">先月</span></div><button class="btn btn-sm" type="button" style="background: #EEE8FF; color: #6045C2; box-shadow: 0 3px 0 #D6CBFA;">育てる</button></div>
+    </div>
+    <div class="card" style="padding: 16px 18px; display: flex; gap: 12px; align-items: flex-start; background: #FFFBF3;">
+      <svg viewBox="0 0 64 64" width="40" height="40" aria-hidden="true" style="flex: none;"><ellipse cx="25" cy="12" rx="8" ry="4.5" transform="rotate(-30 25 12)" fill="#4CB872"></ellipse><ellipse cx="39" cy="12" rx="8" ry="4.5" transform="rotate(30 39 12)" fill="#4CB872"></ellipse><ellipse cx="32" cy="40" rx="24" ry="21" fill="#FFD36B" stroke="#E09A00" stroke-width="2"></ellipse><ellipse cx="24" cy="38" rx="3" ry="4" fill="#3B2A20"></ellipse><ellipse cx="40" cy="38" rx="3" ry="4" fill="#3B2A20"></ellipse><path d="M28 46q4 4 8 0" stroke="#3B2A20" stroke-width="2.5" fill="none" stroke-linecap="round"></path></svg>
+      <p style="margin: 0; font-size: 14px; line-height: 1.7;">「SymNote を友だちに」は5日ひと休み中。<b>5分でできる一歩</b> を出してみる？</p>
+    </div>
+  </aside>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":960}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

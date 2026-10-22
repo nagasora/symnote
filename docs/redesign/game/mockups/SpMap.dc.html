@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>スマホ 冒険マップ</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@500;700;800&amp;family=Zen+Maru+Gothic:wght@500;700&amp;display=swap">
+<style>
+body{margin:0}
+a{color:#1C6AA6}a:hover{color:#134d7a}
+.sn{font-family:"Zen Maru Gothic","Hiragino Maru Gothic ProN",system-ui,sans-serif;color:#3B2A20;background:#FFF6E6;font-weight:500}
+.h{font-family:"M PLUS Rounded 1c","Hiragino Maru Gothic ProN",system-ui,sans-serif;font-weight:800;letter-spacing:.01em}
+.num{font-family:"M PLUS Rounded 1c","Hiragino Maru Gothic ProN",system-ui,sans-serif;font-weight:800;font-variant-numeric:tabular-nums}
+.card{background:#FFFFFF;border:2px solid #F0DFC2;border-radius:20px;box-shadow:0 4px 0 #F0DFC2}
+.btn{font:inherit;font-weight:700;font-size:14px;border:0;border-radius:14px;min-height:44px;padding:0 14px;display:inline-flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;color:#3B2A20;text-decoration:none}
+.btn-sun{background:#FFC23D;box-shadow:0 4px 0 #E09A00}
+.chip{display:inline-flex;align-items:center;gap:4px;height:24px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:700;white-space:nowrap}
+.c-xp{background:#E3F6E9;color:#1F7A44}
+.c-sky{background:#E2F2FD;color:#1C6AA6}
+.c-berry{background:#FFE6E1;color:#B53A28}
+.c-coin{background:#FFF0C7;color:#8A5A00}
+.bar{height:12px;border-radius:999px;background:#F3E6CF;overflow:hidden}
+.bar-fill{display:block;height:100%;background:#5AB8F5;border-radius:999px;box-shadow:inset 0 -3px 0 rgba(0,0,0,.12)}
+.ico{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.faint{color:#7A6555}
+.label{font-size:12px;font-weight:700;color:#7A6555;letter-spacing:.06em}
+.pill{flex:none;min-height:40px;padding:0 14px;border-radius:999px;border:2px solid #F0DFC2;background:#FFFFFF;font:inherit;font-weight:700;font-size:13px;color:#3B2A20;cursor:pointer}
+.pill-on{border-color:#5AB8F5;background:#E2F2FD;color:#1C6AA6}
+.node{width:60px;height:60px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:none;border:0;padding:0;cursor:pointer}
+.n-done{background:#4CB872;box-shadow:0 5px 0 #2E8A50;color:#FFFFFF}
+.n-now{background:#FFC23D;box-shadow:0 5px 0 #E09A00,0 0 0 8px rgba(255,194,61,.28);color:#3B2A20}
+.n-lock{background:#EFE3CF;box-shadow:0 5px 0 #DCCAB0;color:#7A6555}
+.banner{align-self:center;background:#FFFFFF;border:2px solid #F0DFC2;border-radius:999px;padding:6px 14px;font-size:13px;font-weight:700;display:flex;gap:8px;align-items:center}
+.tab{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-height:56px;font-size:11px;font-weight:700;color:#7A6555;text-decoration:none}
+.tab-on{color:#3B2A20}
+</style>
+</helmet>
+<div class="sn" style="width: 390px; height: 844px; position: relative; overflow: hidden;">
+  <div style="box-sizing: border-box; padding: 20px 16px 110px; display: flex; flex-direction: column; gap: 14px;">
+    <header style="display: flex; align-items: center; justify-content: space-between;">
+      <h1 class="h" style="margin: 0; font-size: 26px;">冒険マップ</h1>
+      <a href="#seeds" class="chip" style="height: 36px; background: #EEE8FF; color: #6045C2; text-decoration: none; font-size: 13px;"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 16px; height: 16px;"><path d="M12 21v-9M12 12c0-4-3-6-7-6 0 4 3 6 7 6zM12 10c0-3 2-5 6-5 0 3-2 5-6 5z"></path></svg>たね 4</a>
+    </header>
+    <div style="display: flex; gap: 8px; overflow: hidden;">
+      <button class="pill pill-on" type="button">ゼミ発表</button>
+      <button class="pill" type="button">英語論文</button>
+      <button class="pill" type="button">SymNote を友だちに</button>
+    </div>
+
+    <div class="card" style="padding: 14px 16px; display: flex; flex-direction: column; gap: 8px;">
+      <div style="display: flex; justify-content: space-between; align-items: center;"><b class="h" style="font-size: 17px;">ゼミ発表を成功させる</b><span class="num" style="font-size: 14px; color: #1C6AA6;">60%</span></div>
+      <div class="bar"><span class="bar-fill" style="width: 60%;"></span></div>
+      <span class="faint" style="font-size: 12px;">なぜ：院試で評価される発表にしたい ・ 10月29日まで</span>
+    </div>
+
+    <div style="position: relative; display: flex; flex-direction: column; gap: 14px; padding: 4px 0;">
+      <svg viewBox="0 0 358 440" width="358" height="440" aria-hidden="true" style="position: absolute; left: 0; top: 0;"><path d="M110 70 C 220 110, 250 120, 240 170 S 120 230, 130 290 S 250 350, 230 410" fill="none" stroke="#E6D3B3" stroke-width="7" stroke-dasharray="2 14" stroke-linecap="round"></path></svg>
+
+      <div class="banner" style="position: relative;"><span class="chip c-xp">クリア</span>ステージ 1 ・ テーマを決める</div>
+      <div style="position: relative; display: flex; align-items: center; gap: 12px; padding-left: 80px;"><button class="node n-done" type="button" aria-label="クリア済み：先行研究を3本読む"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 26px; height: 26px; stroke-width: 3;"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></button></div>
+
+      <div class="banner" style="position: relative; border-color: #FFC23D;"><span class="chip c-coin">いまここ</span>ステージ 2 ・ 資料をつくる</div>
+      <div style="position: relative; display: flex; align-items: center; gap: 12px; padding-left: 210px;"><button class="node n-done" type="button" aria-label="クリア済み：構成を決める"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 26px; height: 26px; stroke-width: 3;"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></button></div>
+      <div style="position: relative; display: flex; align-items: center; gap: 12px; padding-left: 100px;">
+        <button class="node n-now" type="button" aria-label="いまのクエスト：スライドを仕上げる"><svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><path d="M12 3l2.6 5.6 6 .7-4.5 4.1 1.2 6L12 16.5 6.7 19.4l1.2-6L3.4 9.3l6-.7z" fill="#3B2A20"></path></svg></button>
+        <div class="card" style="padding: 8px 12px; display: flex; flex-direction: column; gap: 4px;"><b style="font-size: 13px;">スライドを仕上げる</b><span class="chip c-sky">きょうに入っています</span></div>
+      </div>
+      <div style="position: relative; display: flex; align-items: center; gap: 12px; padding-left: 200px;"><button class="node n-lock" type="button" aria-label="これから：リハーサルを1回する"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="#7A6555"></circle></svg></button></div>
+      <div style="position: relative; display: flex; align-items: center; gap: 12px; padding-left: 160px;"><button class="node n-lock" type="button" aria-label="ゴール：発表本番"><svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true"><path d="M6 21V4M6 4h11l-2.5 4L17 12H6" fill="#FF7A66" stroke="#B53A28" stroke-width="1.6" stroke-linejoin="round"></path></svg></button><span class="faint" style="font-size: 13px; font-weight: 700;">ゴール 10/29</span></div>
+    </div>
+  </div>
+
+  <nav aria-label="メイン" style="position: absolute; left: 0; right: 0; bottom: 0; background: #FFFFFF; border-top: 2px solid #F0DFC2; display: flex; align-items: center; padding: 6px 8px 22px;">
+    <a class="tab" href="#today"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 24px; height: 24px;"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>きょう</a>
+    <a class="tab tab-on" href="#map"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 24px; height: 24px; color: #2E8BCB;"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2zM9 4v14M15 6v14"></path></svg>マップ</a>
+    <div style="flex: 1; display: flex; justify-content: center;"><button class="btn btn-sun" type="button" aria-label="ミナに渡す" style="width: 60px; height: 60px; border-radius: 22px; padding: 0; margin-top: -26px;"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 28px; height: 28px; stroke-width: 3;"><path d="M12 5v14M5 12h14"></path></svg></button></div>
+    <a class="tab" href="#board"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 24px; height: 24px;"><rect x="5" y="4" width="14" height="17" rx="2"></rect><path d="M9 4V2.5h6V4M9 10h6M9 14h4"></path></svg>依頼</a>
+    <a class="tab" href="#me"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="width: 24px; height: 24px;"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c1-4 4-6 8-6s7 2 8 6"></path></svg>じぶん</a>
+  </nav>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

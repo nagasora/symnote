@@ -1,12 +1,12 @@
 {
-  "name": "SymNote — AI時代のやわらかい紙のノート",
+  "name": "SymNote — ミナと進む毎日の冒険",
   "short_name": "SymNote",
-  "description": "頭の中を書き出すだけでAIが整理し、今の1件を迷わず進められるタスク・ノート管理アプリ",
-  "start_url": "/",
+  "description": "毎日のTodoを、相棒ミナと小さなクエストに変えるタスク・ノート管理アプリ",
+  "start_url": "/today",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#f5f1e8",
-  "theme_color": "#f5f1e8",
+  "background_color": "#fff6e6",
+  "theme_color": "#ffc23d",
   "lang": "ja",
   "icons": [
     {
