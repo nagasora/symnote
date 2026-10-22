@@ -1,5 +1,7 @@
 # SymNote 招待制ベータ リリース & Cloudflare 公開手順書
 
+> これはMac常駐版の既存手順です。iOS・Webの二系統リリース方針は [IOS_WEB_RELEASE.md](IOS_WEB_RELEASE.md)、Mac非依存のWeb基盤は [POSTGRESQL.md](POSTGRESQL.md) を参照してください。
+
 このドキュメントでは、Mac 上で動く **SymNote Web（招待制ベータ版）** を **Cloudflare Tunnel + 独自ドメイン + Google ログイン** で安全に外部公開し、スマホ（iPhone / Android）や PC、招待した友人がブラウザ・ホーム画面アプリ（PWA）から使えるようにする手順を説明します。
 
 ---

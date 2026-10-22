@@ -31,3 +31,11 @@ Thumbs.db
 # Test coverage output
 .coverage
 htmlcov/
+
+# iOS machine-local and generated build state
+web/ios/**/xcuserdata/
+web/ios/DerivedData/
+web/ios/App/App/public/
+web/ios/App/App/capacitor.config.json
+web/ios/App/CapApp-SPM/.build/
+web/ios/App/CapApp-SPM/Package.resolved
