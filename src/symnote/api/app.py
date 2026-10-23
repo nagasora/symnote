@@ -73,7 +73,7 @@ from symnote.api.schemas import (
 )
 from symnote.core import candidates as candidate_store
 from symnote.core import db, goals, mindmap, postgres, usage_limit
-from symnote.api import game
+from symnote.api import game, integrations
 from symnote.core.accounts import (
     UserRecord,
     complete_onboarding,
@@ -1456,6 +1456,7 @@ def create_app(*, static_dir: Optional[Path] = None) -> Starlette:
         ),
         Route("/api/export", _with_auth(export_get_handler), methods=["GET"]),
         *game.routes(_with_auth),
+        *integrations.routes(_with_auth),
         Route("/{full_path:path}", spa_fallback, methods=["GET"]),
     ]
 

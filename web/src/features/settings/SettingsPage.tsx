@@ -1,3 +1,4 @@
+import { SourceIntegrations } from "./SourceIntegrations";
 import { useEffect, useState } from "react";
 import {
   ArrowLeft,
@@ -188,6 +189,7 @@ export function SettingsPage() {
           )}
         </Card>
       </section>
+      <SourceIntegrations />
       {auth.user?.is_owner && (
         <section className="settings-group">
           <h2>

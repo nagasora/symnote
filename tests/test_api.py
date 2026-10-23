@@ -1110,3 +1110,62 @@ def test_quest_detail_recurrence_edits_and_rollback(api_env):
     stopped = client.patch(endpoint, json={"stop_recurrence": True}, headers=CSRF)
     assert stopped.status_code == 200
     assert "停止" in stopped.json()["task"]["recurrence"]["label"]
+
+
+def test_conversation_import_is_consented_bounded_and_user_scoped(api_env, monkeypatch):
+    import json
+    from symnote.core import llm
+
+    app = create_app()
+    owner = _login_client(app, "owner@example.com", is_owner=True)
+    invite_user("sources-member@example.com")
+    member = _login_client(app, "sources-member@example.com")
+    endpoint = "/api/integrations/conversation"
+    text = "user: 金曜日までに見積書を送る"
+    request = {"text": text, "consent": True}
+    calls = []
+
+    def fake_ai(prompt):
+        calls.append(prompt)
+        from symnote.core.chatgpt_import import parse_pasted_text
+        return {"candidates": [{
+            "source_ref": parse_pasted_text(text).source_ref,
+            "title": "見積書を送る", "details": "金曜日まで", "confidence": 0.9,
+            "excerpt": "金曜日までに見積書を送る",
+        }]}
+
+    monkeypatch.setattr(llm, "generate_json", fake_ai)
+    assert TestClient(app).post(endpoint, json=request, headers=CSRF).status_code == 401
+    assert member.post(endpoint, json=request).status_code == 403
+    assert member.post(endpoint, json={**request, "consent": False}, headers=CSRF).status_code == 400
+    assert member.post(endpoint, json={**request, "consent": "true"}, headers=CSRF).status_code == 400
+    assert member.post(endpoint, json={**request, "text": " "}, headers=CSRF).status_code == 400
+    assert member.post(endpoint, json={**request, "text": "a" * 12001}, headers=CSRF).status_code == 400
+    assert member.post(endpoint, content=b"x" * 100001, headers=CSRF).status_code == 413
+    assert member.post(endpoint, json=request, headers=CSRF).status_code == 503
+    assert not calls
+    monkeypatch.setenv("LLM_API_KEY", "test-only-not-a-real-key")
+    status = member.get("/api/integrations").json()
+    assert status["ai"]["configured"] and not status["ai"]["connection_verified"]
+    assert not status["gmail"]["connected"] and not status["slack"]["available"]
+    assert "test-only-not-a-real-key" not in json.dumps(status)
+    result = member.post(endpoint, json=request, headers=CSRF)
+    assert result.status_code == 200, result.text
+    assert result.json()["created_count"] == 1
+    duplicate = member.post(endpoint, json=request, headers=CSRF).json()
+    assert duplicate["created_count"] == 0 and duplicate["duplicate_count"] == 1
+    assert owner.get("/api/inbox").json()["pending_candidates"] == []
+    inbox = member.get("/api/inbox").json()["pending_candidates"]
+    assert len(inbox) == 1 and inbox[0]["source"] == "chat"
+    assert member.get("/api/tasks?status=all").json()["tasks"] == []
+    assert owner.post(f"/api/candidates/{inbox[0]['id']}/approve", json={}, headers=CSRF).status_code == 404
+    approved = member.post(f"/api/candidates/{inbox[0]['id']}/approve", json={}, headers=CSRF)
+    assert approved.status_code == 200, approved.text
+    assert len(member.get("/api/tasks?status=all").json()["tasks"]) == 1
+
+    def fail_ai(_prompt):
+        raise RuntimeError("private provider error must not leak")
+    monkeypatch.setattr(llm, "generate_json", fail_ai)
+    failed = member.post(endpoint, json=request, headers=CSRF)
+    assert failed.status_code == 502
+    assert "private provider" not in failed.text

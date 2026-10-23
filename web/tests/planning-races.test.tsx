@@ -173,3 +173,34 @@ describe("planning request races", () => {
     expect(screen.getByRole("button", { name: "選んだ道を保存" })).toBeEnabled();
   });
 });
+
+import { SourceIntegrations } from "../src/features/settings/SourceIntegrations";
+
+it("requires consent for selected conversation and preserves text after a failed extraction", async () => {
+  apiFetchMock.mockResolvedValueOnce({
+    ai: { configured: true, provider: "openai", connection_verified: false },
+    conversation: { max_characters: 12000 },
+    gmail: { reason: "利用者別接続は準備中" },
+    slack: { reason: "チャンネルを指定" },
+  });
+  render(<MemoryRouter><SourceIntegrations /></MemoryRouter>);
+  const input = await screen.findByLabelText(/対象の会話/);
+  const send = screen.getByRole("button", { name: "依頼の候補を作る" });
+  fireEvent.change(input, { target: { value: "明日までに見積書を送る" } });
+  expect(send).toBeDisabled();
+  fireEvent.click(screen.getByRole("checkbox"));
+  const response = deferred<{ message: string }>();
+  apiFetchMock.mockReturnValueOnce(response.promise);
+  fireEvent.click(send);
+  expect(send).toBeDisabled();
+  expect(input).toBeDisabled();
+  expect(apiFetchMock).toHaveBeenLastCalledWith("/api/integrations/conversation", {
+    body: { text: "明日までに見積書を送る", consent: true },
+  });
+  await act(async () => response.reject(new Error("接続できません")));
+  expect(await screen.findByRole("alert")).toHaveTextContent("接続できません");
+  expect(input).toHaveValue("明日までに見積書を送る");
+  fireEvent.change(input, { target: { value: "別の会話" } });
+  expect(screen.getByRole("checkbox")).not.toBeChecked();
+  expect(send).toBeDisabled();
+});
