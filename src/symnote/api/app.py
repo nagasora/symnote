@@ -185,6 +185,11 @@ def _with_auth(
             return _error(str(exc), status_code=403, code="forbidden")
         except usage_limit.UsageLimitExceeded as exc:
             return _error(str(exc), status_code=429, code="rate_limited")
+        except integrations.providers.ProviderError as exc:
+            response = _error(str(exc), status_code=429 if exc.code == "rate_limited" else 502, code=exc.code)
+            if exc.retry_after:
+                response.headers["Retry-After"] = str(exc.retry_after)
+            return integrations.no_store(response)
         except ValueError as exc:
             return _error(str(exc), status_code=400, code="bad_request")
 

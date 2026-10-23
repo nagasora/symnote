@@ -19,3 +19,6 @@ GEMINI.md
 
 web/node_modules
 web/dist
+
+# Local integration credentials
+.env.integrations.local

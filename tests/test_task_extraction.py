@@ -180,4 +180,4 @@ def test_empty_items_are_processed_without_ai_call() -> None:
 def test_unknown_source_is_rejected() -> None:
     """gmail / chat 以外の取り込み元は拒否する。"""
     with pytest.raises(ValueError):
-        extract_task_candidates("slack", [], FakeAI([]))
+        extract_task_candidates("unknown", [], FakeAI([]))

@@ -1,43 +1,76 @@
-# 利用者別の情報源連携：実装状態と実機テストの前提
+# Gmail・Slack直接連携と実機テストの前提
 
-2026-10-23。各利用者が自分のGmail・Slackを接続する構成。Codexのコネクター接続をSymNoteの接続として扱わない。
+2026-10-23。基本機能はSymNote自身が情報源を読み、既存AI APIで承認待ち候補を作る。ChatGPT Work/MCP経由の候補送信は任意の追加経路とし、直接連携には不要。
 
-## 今回の実装
+## 実装済み
 
-設定の「情報源から依頼を見つける」から、選択した会話テキストを送信できる。
+- 利用者別OAuth。ブラウザセッション・利用者・プロバイダーに結び付けた一回限りのstate。有効期限10分。GmailはPKCEも使用。
+- 利用者別DB／PostgreSQLスキーマに暗号化接続情報を保存。暗号化された内容にも本人とプロバイダーを結び付け、別利用者へコピーしたデータを拒否。
+- Gmailは`gmail.readonly`だけ。メイン受信箱（INBOX・CATEGORY_PERSONAL）の直近7日間を読み、送信・既読化・ラベル変更・削除は行わない。
+- Slackは`user_scope=channels:read,channels:history`だけ。Botの機能・権限は要求せず、Botを含む応答や追加権限も拒否。チャンネル参加・招待・投稿のAPIは通信入口でも拒否する。
+- 接続後、本人が公開チャンネルを最大5つ選ぶ。指定前は本文を取得しない。DM・非公開チャンネル・添付ファイル・スレッド返信の別途取得は対象外。Slack側の管理・認可情報の表示を隠す機能ではない。
+- 各取り込みは、指定範囲を設定済みAIへ送信することに本人が同意して開始する。候補・説明・根拠引用を自分の依頼ボードへ保存し、本人が「受ける」を押すまでタスクにしない。
+- 接続確認・取得確認・全範囲の取り込み完了を別々の日時で表示する。設定ありだけで実接続成功と表示しない。
+- 既存のAI利用枠、取得上限、429とRetry-Afterの表示、トークンの期限・更新、ローカル接続解除を実装。解除はSymNote内の資格情報を削除する操作で、プロバイダー側の許可取消は各サービスで行う。
+- 同じ情報源の並行操作を拒否し、実行権限を外部通信／AI送信直前に確認する。認可コード交換中に解除・再開始された古いcallbackは保存できない。
+- 成功した出典だけを候補と同じトランザクションで処理済みにする。失敗した出典は再試行できる。Gmailは1回最大20件、Slackは1回1チャンネルの1ページ・最大15件。続きの位置は成功後だけ保存し、次回へ引き継ぐ。Slackの続きは短時間で期限切れになるカーソルではなく、取得済みの最古の投稿時刻を境界に再開する。Gmailの期限切れページ位置は処理済み照合を保って先頭から再走査する。複数チャンネルは順番に読む。未取得部分は完了扱いにしない。
+- 会話テキストは最大12,000文字の明示送信に対応。ChatGPTの全履歴自動取得やファイルアップロードは未対応。
 
-- GET `/api/integrations`：AIの設定有無と、情報源の対応状態。設定の存在は実接続成功を意味しない。
-- POST `/api/integrations/conversation`：`text`（最大12,000文字）と真偽値`consent`。認証・CSRF・利用者別保存先・既存の利用枠制限を使用する。
-- 入力は明示同意後だけ設定済みAIに送信する。候補と根拠引用を依頼ボードに保存し、自動で承認・タスク化しない。
-- 元テキストのハッシュを出典IDとし、同一出典・同一候補名の重複を既存ストアで防ぐ。再送時のAI呼び出し自体をキャッシュする実装ではない。
-- 失敗時は本文を入力欄に残す。AI未設定、拒否、通信失敗を候補0件の成功と混同しない。
-- ChatGPTの履歴全体を自動取得する機能やエクスポートファイルのWebアップロードは未対応。
+## 設定
 
-## Gmail・Slackの残作業
+既存Googleログインの設定`SYMNOTE_GOOGLE_CLIENT_ID`／`SYMNOTE_GOOGLE_CLIENT_SECRET`を使用する。
 
-両サービスは現時点で利用者別OAuth未実装。UIも「準備中」と表示する。Mac共通のkeyringの資格情報を他利用者に使用しない。
+追加のサーバー設定：
 
-1. 利用者別の暗号化された接続ストアと、一回限りの認可stateを追加。セッション／利用者／プロバイダーと認可フローを結びつけ、別利用者への取り違え・state再利用・任意redirectを拒否する。暗号鍵はDB外のサーバー秘密設定とし、未設定なら接続を拒否する。
-2. Gmailは既存SymNote Googleプロジェクトを使用する方針を本人確認済み。Googleログインの承認とGmailの読み取り承認を分ける。OAuth同意画面、Gmail API有効化、固定HTTPS callback、テスト利用者を確認する。
-3. Slackはワークスペースと公開チャンネルの指定待ち。利用者が接続したという理由だけで全チャンネルを取得しない。個人単位の読み取り権限かBot方式かを確定し、同じワークスペース内の別利用者でも接続・対象範囲を混同しない。
-4. 本人が許可した範囲だけを直近7日間から取得。Gmailはメイン受信箱、Slackは指定公開チャンネル。ページング・取得上限・レート制限・再試行・重複排除・解除／失効を実装する。
-5. Slack本文の候補抽出は既存抽出器へ対応追加が必要（現在`gmail`と`chat`のみ）。サービスのscopeと取得対象の検証はサーバーで行う。
-6. 2利用者・2接続のテスト後、実サービスで取得→候補→本人承認→タスク→再取得時の重複確認を行う。
+|変数|用途|
+|---|---|
+|`SYMNOTE_PUBLIC_ORIGIN`|固定HTTPS origin。現在の戻り先は`https://app.symnote.app`。|
+|`SYMNOTE_SLACK_CLIENT_ID` / `SYMNOTE_SLACK_CLIENT_SECRET`|BotのないSlackアプリのOAuth設定。|
+|`SYMNOTE_INTEGRATION_KEY`|Fernet形式の接続情報暗号鍵。DBとは別に安全に保管する。|
 
-Slackへの「接続しました」投稿や送信権限は要求しない方針。ただしBot追加等に伴うSlack自身の表示が出ないとは保証しない。実際の方式と権限を設定前に確認する。
+本人承認に基づき、ローカル暗号鍵を`.env.integrations.local`へ保存済み（0600）。既存`.env`は編集していない。起動時にこの追加ファイルを読み、環境変数や既存`.env`の指定を上書きしない。Git／Dockerの送信対象から除外。鍵を紛失・変更すると既存接続を復号できなくなるため、サーバーでは秘密設定として継続保管する。ファイルや秘密値をチャットへ貼らない。
 
-## 実機リモートテストへのゲート
+```sh
+.venv/bin/python scripts/check_source_integrations.py
+```
 
-- 利用者別OAuthと範囲選択が動作し、接続成功・取得成功・AI抽出成功を別々に記録できる。
-- 指定した実データで候補の出典と本人承認を確認済み。
-- HTTPS URLと認証がある検証環境へ反映。実DBや既存ユーザーデータを初期化しない。
-- スマホSafari／PWAでログイン、候補確認、承認、クリア、オフライン復帰を確認。
-- Macを止めても使う確認は、クラウド側のAPI／DB稼働が整ってから行う。ローカルのTunnel疎通だけで代替しない。
+このコマンドは設定の存在と固定callback URLだけを出力する。資格情報・実DBは出力せず、未設定があれば終了コード1。Google側の登録状況・実OAuth成功まで保証する検査ではない。
 
-## 今回の証拠
+Slackアプリ作成用の[manifest](slack-app-manifest.json)にはUser Token Scopesだけを記載し、Bot User・Bot Scopes・Events・Webhookは含めない。対象ワークスペースは本人指定の「松尾研 DL community」。アプリの登録と認可にはワークスペースの管理方針に応じた承認が必要。
 
-- 一時SQLiteを使い、同意・認証・CSRF・入力上限・利用者分離・重複・承認・失敗のAPIテストに成功。
-- 架空会話1件で既存OpenAI設定の実接続に成功（AI呼び出し1回、候補1件、タスク0件）。実メール・実会話は未送信。
-- PostgreSQLでの今回の追加API、実Gmail／Slack OAuth、実機スマホからの操作は未検証。
+callback URL：
 
-参考：[Gmail API scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)、[Slack OAuth](https://docs.slack.dev/authentication/installing-with-oauth/)、[Slack history](https://docs.slack.dev/reference/methods/conversations.history/)。
+- `https://app.symnote.app/api/integrations/gmail/callback`
+- `https://app.symnote.app/api/integrations/slack/callback`
+
+## API
+
+|メソッド・パス|操作|
+|---|---|
+|GET `/api/integrations`|本人の接続・取り込み状態。秘密値は返さない。|
+|POST `/api/integrations/{provider}/start`|認証済みブラウザから認可開始。|
+|GET `/api/integrations/{provider}/callback`|一回限りの認可完了。|
+|GET / PUT `/api/integrations/slack/channels`|公開チャンネル一覧／選択を保存。|
+|POST `/api/integrations/{provider}/import`|`consent: true`で指定範囲から候補を作成。|
+|DELETE `/api/integrations/{provider}`|本人のローカル接続と保留中stateを削除。|
+|POST `/api/integrations/conversation`|`text`と`consent: true`で会話から候補作成。|
+
+全操作に既存の認証・利用者スコープを適用。状態変更にはCSRFヘッダーが必要。OAuth接続開始はSafari等のCookieログイン済みブラウザから行う。ネイティブiOSアプリ内の別ブラウザへのセッション引き継ぎは未対応で、最初の実機確認はSafari／PWAとする。
+
+## 移行と検証
+
+SQLite・PostgreSQLへv19の接続・state・処理済み表を追加する。既存のメモやタスクを削除・上書きしない。PostgreSQLのインポート／エクスポートでは接続情報と保留中stateを除外し、復元先へ秘密値を運ばない。
+
+自動テストは一時SQLiteと使い捨てPostgreSQLで行う。認証・同意・CSRF、本人／別利用者／別セッション、state再利用、暗号化・取り違え、Bot／追加権限拒否、取得範囲、レート制限、失敗後再試行、ページの引き継ぎ、二重処理、解除・期限切れ競合、移行・エクスポート除外を確認する。外部サービスは模擬通信。全体919件成功・2件の想定スキップを確認し、ページ再開の最終修正後は両DBの連携重点14件が成功。フロント13件・実機準備2件・画面E2E6件とビルドも成功。以前の架空会話1件によるOpenAI実疎通は成功しているが、実Gmail／Slack取得の代替にはしない。
+
+## 外部で実施済み／未完了
+
+- 既存Googleプロジェクト`gen-lang-client-0779756169`（symnote）でGmail APIを有効化し「有効」を確認。
+- 本人の保存直前承認を受け、「SymNote Web」にGmail callbackを追加・保存し、保存成功表示を確認。
+- OAuth同意画面はテスト中、現在のテスト利用者は1人。一般提供へのGoogle側の検証は別工程。
+- Slack管理画面は現在未ログイン。クライアント設定は未登録で、まだ実接続していない。
+- 既存の検証用ホストを再起動してコードを反映。ローカルhealth 200と公開URLでの既存Googleログイン成功を確認。Gmail／Slackの追加認可・実取得・候補確認は未実施。実機テスト完了とも扱わない。
+
+実機への進行条件は「指定した実データで取得→AI候補→本人承認→再取得で重複なし」を確認すること。その後、認証付きHTTPS環境へスマホSafari／PWAでアクセスし、ログイン・承認・クリア・復帰を確認する。既存公開サービスを無断で別の一時DBへ切り替えない。Mac停止中の利用には別途クラウドAPI／DB稼働が必要。
+
+参考：[Google Web OAuth](https://developers.google.com/identity/protocols/oauth2/web-server)、[Gmail scopes](https://developers.google.com/workspace/gmail/api/auth/scopes)、[Slack OAuth](https://docs.slack.dev/authentication/installing-with-oauth/)、[Slack history](https://docs.slack.dev/reference/methods/conversations.history/)。

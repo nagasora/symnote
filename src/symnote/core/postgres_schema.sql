@@ -265,3 +265,32 @@ CREATE INDEX IF NOT EXISTS idx_focus_sessions_started ON focus_sessions(started_
 CREATE INDEX IF NOT EXISTS idx_agent_reports_status ON agent_reports(status);
 CREATE INDEX IF NOT EXISTS idx_mindmap_project ON mindmap_nodes(project_id);
 CREATE INDEX IF NOT EXISTS idx_mindmap_parent ON mindmap_nodes(parent_id);
+
+CREATE TABLE IF NOT EXISTS source_connections (
+  provider TEXT PRIMARY KEY,
+  revision TEXT NOT NULL,
+  credentials TEXT NOT NULL,
+  account TEXT NOT NULL,
+  workspace TEXT NOT NULL DEFAULT '',
+  channels TEXT NOT NULL DEFAULT '[]',
+  checkpoint TEXT NOT NULL DEFAULT '{}',
+  verified_at DOUBLE PRECISION NOT NULL,
+  last_fetch_at DOUBLE PRECISION,
+  last_success_at DOUBLE PRECISION,
+  last_error TEXT NOT NULL DEFAULT '',
+  run_id TEXT NOT NULL DEFAULT '',
+  run_until DOUBLE PRECISION NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS source_oauth_states (
+  state_hash TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  session_hash TEXT NOT NULL,
+  expires_at DOUBLE PRECISION NOT NULL,
+  consumed INTEGER NOT NULL DEFAULT 0,
+  payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS source_processed (
+  provider TEXT NOT NULL,
+  source_ref TEXT NOT NULL,
+  PRIMARY KEY (provider, source_ref)
+);

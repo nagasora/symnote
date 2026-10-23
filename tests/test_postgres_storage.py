@@ -367,7 +367,7 @@ def test_v17_to_v18_bonus_migration_is_additive(pg_url: str) -> None:
         item_id = db.insert_task("Preserved")
         with db.connection() as conn, conn:
             conn.execute("DROP TABLE quest_bonus_log")
-            conn.execute("DELETE FROM _symnote_schema_migrations WHERE version = 18")
+            conn.execute("DELETE FROM _symnote_schema_migrations WHERE version >= 18")
 
         db.init_db()
         db.init_db()
@@ -380,7 +380,7 @@ def test_v17_to_v18_bonus_migration_is_additive(pg_url: str) -> None:
             table = conn.execute(
                 "SELECT to_regclass('quest_bonus_log')"
             ).fetchone()[0]
-        assert version == postgres.POSTGRES_SCHEMA_VERSION == 18
+        assert version == postgres.POSTGRES_SCHEMA_VERSION == 19
         assert table == "quest_bonus_log"
 
 
@@ -418,3 +418,22 @@ def test_integrity_errors_keep_sqlite_domain_contract(tenant: str) -> None:
                 "INSERT INTO achievements(code, unlocked_at) VALUES (?, ?)",
                 ("unique", "2026-10-21T00:00:01"),
             )
+
+
+def test_v18_source_migration_preserves_existing_items(pg_url):
+    user_id = f"pytest-v18-v19-{uuid.uuid4()}"
+    with postgres.user_schema(user_id):
+        db.init_db()
+        item_id = db.insert_task("Keep existing data")
+        tables = ("source_connections", "source_oauth_states", "source_processed")
+        with db.connection() as conn, conn:
+            for table in tables:
+                conn.execute(f"DROP TABLE {table}")
+            conn.execute("DELETE FROM _symnote_schema_migrations WHERE version >= 19")
+        db.init_db()
+        db.init_db()
+        assert db.fetch_item(item_id) is not None
+        with db.connection() as conn:
+            assert conn.execute("SELECT MAX(version) FROM _symnote_schema_migrations").fetchone()[0] == 19
+            for table in tables:
+                assert conn.execute("SELECT to_regclass(?)", (table,)).fetchone()[0] == table

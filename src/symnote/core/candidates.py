@@ -143,44 +143,53 @@ def propose_candidates(
     """
     if len(candidates) > MAX_CANDIDATES_PER_PROPOSAL:
         raise ValueError(f"一度に提案できる候補は {MAX_CANDIDATES_PER_PROPOSAL} 件までです。")
-    now = dt.datetime.now().isoformat(timespec="seconds")
-    created: List[int] = []
-    duplicates = 0
     with connection() as conn, conn:
         if deduplicate_source_ref:
             conn.execute("BEGIN IMMEDIATE")
-        for candidate in candidates:
-            if deduplicate_source_ref and conn.execute(
-                "SELECT 1 FROM task_candidates WHERE source = ? AND source_ref = ? LIMIT 1",
-                (candidate.source, candidate.source_ref),
-            ).fetchone():
-                duplicates += 1
-                continue
-            cur = conn.execute(
-                """
-                INSERT INTO task_candidates (
-                  created_at, source, source_ref, source_url, title, details,
-                  excerpt, due_date, due_time, confidence, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-                ON CONFLICT(source, source_ref, title) DO NOTHING
-                """,
-                (
-                    now,
-                    candidate.source,
-                    candidate.source_ref,
-                    candidate.source_url,
-                    candidate.title,
-                    candidate.details,
-                    candidate.excerpt,
-                    candidate.due_date,
-                    candidate.due_time,
-                    candidate.confidence,
-                ),
-            )
-            if cur.rowcount:
-                created.append(int(cur.lastrowid))
-            else:
-                duplicates += 1
+        return propose_candidates_in_transaction(conn, candidates, deduplicate_source_ref=deduplicate_source_ref)
+
+
+def propose_candidates_in_transaction(
+    conn: Any, candidates: Sequence[CandidateInput], *, deduplicate_source_ref: bool = False,
+) -> ProposalResult:
+    """候補と情報源の処理済み記録を同じ取引で確定するための共通入口。"""
+    if len(candidates) > MAX_CANDIDATES_PER_PROPOSAL:
+        raise ValueError("候補の件数が上限を超えています。")
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    created: List[int] = []
+    duplicates = 0
+    for candidate in candidates:
+        if deduplicate_source_ref and conn.execute(
+            "SELECT 1 FROM task_candidates WHERE source = ? AND source_ref = ? LIMIT 1",
+            (candidate.source, candidate.source_ref),
+        ).fetchone():
+            duplicates += 1
+            continue
+        cur = conn.execute(
+            """
+            INSERT INTO task_candidates (
+              created_at, source, source_ref, source_url, title, details,
+              excerpt, due_date, due_time, confidence, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+            ON CONFLICT(source, source_ref, title) DO NOTHING
+            """,
+            (
+                now,
+                candidate.source,
+                candidate.source_ref,
+                candidate.source_url,
+                candidate.title,
+                candidate.details,
+                candidate.excerpt,
+                candidate.due_date,
+                candidate.due_time,
+                candidate.confidence,
+            ),
+        )
+        if cur.rowcount:
+            created.append(int(cur.lastrowid))
+        else:
+            duplicates += 1
     return ProposalResult(created_ids=created, duplicate_count=duplicates)
 
 

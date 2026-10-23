@@ -44,3 +44,6 @@ web/ios/App/CapApp-SPM/Package.resolved
 
 # TypeScript incremental build state
 *.tsbuildinfo
+
+# Local integration credentials
+.env.integrations.local
