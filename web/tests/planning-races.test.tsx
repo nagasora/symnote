@@ -173,3 +173,64 @@ describe("planning request races", () => {
     expect(screen.getByRole("button", { name: "選んだ道を保存" })).toBeEnabled();
   });
 });
+
+import { SourceIntegrations } from "../src/features/settings/SourceIntegrations";
+
+it("requires consent for selected conversation and preserves text after a failed extraction", async () => {
+  apiFetchMock.mockResolvedValueOnce({
+    ai: { configured: true, provider: "openai", connection_verified: false },
+    conversation: { max_characters: 12000 },
+    gmail: { reason: "利用者別接続は準備中" },
+    slack: { reason: "チャンネルを指定" },
+  });
+  render(<MemoryRouter><SourceIntegrations /></MemoryRouter>);
+  const input = await screen.findByLabelText(/対象の会話/);
+  const send = screen.getByRole("button", { name: "依頼の候補を作る" });
+  fireEvent.change(input, { target: { value: "明日までに見積書を送る" } });
+  expect(send).toBeDisabled();
+  fireEvent.click(screen.getByRole("checkbox"));
+  const response = deferred<{ message: string }>();
+  apiFetchMock.mockReturnValueOnce(response.promise);
+  fireEvent.click(send);
+  expect(send).toBeDisabled();
+  expect(input).toBeDisabled();
+  expect(apiFetchMock).toHaveBeenLastCalledWith("/api/integrations/conversation", {
+    body: { text: "明日までに見積書を送る", consent: true },
+  });
+  await act(async () => response.reject(new Error("接続できません")));
+  expect(await screen.findByRole("alert")).toHaveTextContent("接続できません");
+  expect(input).toHaveValue("明日までに見積書を送る");
+  fireEvent.change(input, { target: { value: "別の会話" } });
+  expect(screen.getByRole("checkbox")).not.toBeChecked();
+  expect(send).toBeDisabled();
+});
+
+import { RemoteSource, type ConnectionStatus } from "../src/features/settings/RemoteSource";
+
+it("requires saved Slack channel scope and consent, and never starts an import on selection", async () => {
+  const status: ConnectionStatus = {
+    available: true, connected: true, reason: "", account: "U111", workspace: "T111",
+    channels: [], verified_at: 1, last_fetch_at: null, last_success_at: null, last_error: "",
+  };
+  const reload = vi.fn().mockResolvedValue(undefined);
+  const view = render(<MemoryRouter><RemoteSource provider="slack" status={status} aiConfigured reload={reload} /></MemoryRouter>);
+  apiFetchMock.mockResolvedValueOnce({ channels: [{ id: "COPEN", name: "read-only" }], next_cursor: "" });
+  fireEvent.click(screen.getByRole("button", { name: "公開チャンネルを表示" }));
+  const channel = await screen.findByRole("checkbox", { name: /read-only/ });
+  fireEvent.click(channel);
+  expect(screen.getByRole("button", { name: "Slackから依頼の候補を作る" })).toBeDisabled();
+  apiFetchMock.mockResolvedValueOnce({ channels: ["COPEN"] });
+  fireEvent.click(screen.getByRole("button", { name: "対象チャンネルを保存" }));
+  await waitFor(() => expect(reload).toHaveBeenCalledOnce());
+  expect(apiFetchMock).toHaveBeenLastCalledWith("/api/integrations/slack/channels", { method: "PUT", body: { channels: ["COPEN"] } });
+  view.rerender(<MemoryRouter><RemoteSource provider="slack" status={{ ...status, channels: ["COPEN"] }} aiConfigured reload={reload} /></MemoryRouter>);
+  const send = screen.getByRole("button", { name: "Slackから依頼の候補を作る" });
+  expect(send).toBeDisabled();
+  fireEvent.click(screen.getByRole("checkbox", { name: /この範囲/ }));
+  expect(send).not.toBeDisabled();
+  apiFetchMock.mockResolvedValueOnce({ message: "候補を1件追加しました", fetched_count: 2, ai_calls: 1 });
+  fireEvent.click(send);
+  await screen.findByText(/今回の未処理情報：2件。AI処理：1回。候補を1件追加しました/);
+  expect(apiFetchMock).toHaveBeenLastCalledWith("/api/integrations/slack/import", { body: { consent: true } });
+  expect(screen.getByRole("checkbox", { name: /この範囲/ })).not.toBeChecked();
+});

@@ -73,7 +73,7 @@ from symnote.api.schemas import (
 )
 from symnote.core import candidates as candidate_store
 from symnote.core import db, goals, mindmap, postgres, usage_limit
-from symnote.api import game
+from symnote.api import game, integrations
 from symnote.core.accounts import (
     UserRecord,
     complete_onboarding,
@@ -185,6 +185,11 @@ def _with_auth(
             return _error(str(exc), status_code=403, code="forbidden")
         except usage_limit.UsageLimitExceeded as exc:
             return _error(str(exc), status_code=429, code="rate_limited")
+        except integrations.providers.ProviderError as exc:
+            response = _error(str(exc), status_code=429 if exc.code == "rate_limited" else 502, code=exc.code)
+            if exc.retry_after:
+                response.headers["Retry-After"] = str(exc.retry_after)
+            return integrations.no_store(response)
         except ValueError as exc:
             return _error(str(exc), status_code=400, code="bad_request")
 
@@ -1456,6 +1461,7 @@ def create_app(*, static_dir: Optional[Path] = None) -> Starlette:
         ),
         Route("/api/export", _with_auth(export_get_handler), methods=["GET"]),
         *game.routes(_with_auth),
+        *integrations.routes(_with_auth),
         Route("/{full_path:path}", spa_fallback, methods=["GET"]),
     ]
 

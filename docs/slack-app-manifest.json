@@ -1,0 +1,16 @@
+{
+  "display_information": {
+    "name": "SymNote Reader",
+    "description": "選択した公開チャンネルから本人向けの承認待ちタスク候補を作る",
+    "background_color": "#276448"
+  },
+  "oauth_config": {
+    "redirect_urls": ["https://app.symnote.app/api/integrations/slack/callback"],
+    "scopes": {"user": ["channels:read", "channels:history"]}
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": true
+  }
+}

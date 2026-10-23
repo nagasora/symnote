@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 load_dotenv()
+# 既存.envを編集せずに連携用の秘密設定を追加し、環境変数の指定は上書きしない。
+load_dotenv(Path(__file__).resolve().parents[2] / ".env.integrations.local", override=False)
 
 _scoped_db_path: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "symnote_scoped_db_path",

@@ -922,6 +922,9 @@ def test_postgres_import_export_preserves_data_and_refuses_overwrite(api_env: Pa
         with db.connection() as conn:
             assert conn.execute("SELECT embedding FROM items WHERE id = ?", (item_id,)).fetchone()[0] == b"\x00\x01\xff"
         assert db.insert_item("memo", "移行後の新規データ") > item_id
+        with db.connection() as conn, conn:
+            conn.execute("INSERT INTO source_connections(provider, revision, credentials, account, verified_at) VALUES ('gmail', 'rev', 'export-secret-sentinel', 'test@example.com', 1)")
+            conn.execute("INSERT INTO source_oauth_states(state_hash, provider, session_hash, expires_at, payload) VALUES ('test-state', 'gmail', 'test-session', 1, 'private-state-sentinel')")
     with pytest.raises(ValueError, match="must be empty"):
         import_sqlite(source, "owner")
     output = api_env / "export.db"
@@ -932,6 +935,10 @@ def test_postgres_import_export_preserves_data_and_refuses_overwrite(api_env: Pa
         row = conn.execute("SELECT raw_text, embedding FROM items WHERE id = ?", (item_id,)).fetchone()
         assert row == ("合成データ：日本語と NULL とバイナリ", b"\x00\x01\xff")
         assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        assert conn.execute("SELECT count(*) FROM source_connections").fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM source_oauth_states").fetchone()[0] == 0
+    assert b"export-secret-sentinel" not in output.read_bytes()
+    assert b"private-state-sentinel" not in output.read_bytes()
     with pytest.raises(FileExistsError):
         export_sqlite(output, "owner")
 
@@ -1110,3 +1117,338 @@ def test_quest_detail_recurrence_edits_and_rollback(api_env):
     stopped = client.patch(endpoint, json={"stop_recurrence": True}, headers=CSRF)
     assert stopped.status_code == 200
     assert "停止" in stopped.json()["task"]["recurrence"]["label"]
+
+
+def test_conversation_import_is_consented_bounded_and_user_scoped(api_env, monkeypatch):
+    import json
+    from symnote.core import llm
+
+    app = create_app()
+    owner = _login_client(app, "owner@example.com", is_owner=True)
+    invite_user("sources-member@example.com")
+    member = _login_client(app, "sources-member@example.com")
+    endpoint = "/api/integrations/conversation"
+    text = "user: 金曜日までに見積書を送る"
+    request = {"text": text, "consent": True}
+    calls = []
+
+    def fake_ai(prompt):
+        calls.append(prompt)
+        from symnote.core.chatgpt_import import parse_pasted_text
+        return {"candidates": [{
+            "source_ref": parse_pasted_text(text).source_ref,
+            "title": "見積書を送る", "details": "金曜日まで", "confidence": 0.9,
+            "excerpt": "金曜日までに見積書を送る",
+        }]}
+
+    monkeypatch.setattr(llm, "generate_json", fake_ai)
+    assert TestClient(app).post(endpoint, json=request, headers=CSRF).status_code == 401
+    assert member.post(endpoint, json=request).status_code == 403
+    assert member.post(endpoint, json={**request, "consent": False}, headers=CSRF).status_code == 400
+    assert member.post(endpoint, json={**request, "consent": "true"}, headers=CSRF).status_code == 400
+    assert member.post(endpoint, json={**request, "text": " "}, headers=CSRF).status_code == 400
+    assert member.post(endpoint, json={**request, "text": "a" * 12001}, headers=CSRF).status_code == 400
+    assert member.post(endpoint, content=b"x" * 100001, headers=CSRF).status_code == 413
+    assert member.post(endpoint, json=request, headers=CSRF).status_code == 503
+    assert not calls
+    monkeypatch.setenv("LLM_API_KEY", "test-only-not-a-real-key")
+    status = member.get("/api/integrations").json()
+    assert status["ai"]["configured"] and not status["ai"]["connection_verified"]
+    assert not status["gmail"]["connected"] and not status["slack"]["available"]
+    assert "test-only-not-a-real-key" not in json.dumps(status)
+    result = member.post(endpoint, json=request, headers=CSRF)
+    assert result.status_code == 200, result.text
+    assert result.json()["created_count"] == 1
+    duplicate = member.post(endpoint, json=request, headers=CSRF).json()
+    assert duplicate["created_count"] == 0 and duplicate["duplicate_count"] == 1
+    assert owner.get("/api/inbox").json()["pending_candidates"] == []
+    inbox = member.get("/api/inbox").json()["pending_candidates"]
+    assert len(inbox) == 1 and inbox[0]["source"] == "chat"
+    assert member.get("/api/tasks?status=all").json()["tasks"] == []
+    assert owner.post(f"/api/candidates/{inbox[0]['id']}/approve", json={}, headers=CSRF).status_code == 404
+    approved = member.post(f"/api/candidates/{inbox[0]['id']}/approve", json={}, headers=CSRF)
+    assert approved.status_code == 200, approved.text
+    assert len(member.get("/api/tasks?status=all").json()["tasks"]) == 1
+
+    def fail_ai(_prompt):
+        raise RuntimeError("private provider error must not leak")
+    monkeypatch.setattr(llm, "generate_json", fail_ai)
+    failed = member.post(endpoint, json=request, headers=CSRF)
+    assert failed.status_code == 502
+    assert "private provider" not in failed.text
+
+
+@pytest.mark.parametrize("provider", ["gmail", "slack"])
+def test_direct_source_oauth_is_read_only_scoped_and_retryable(api_env, monkeypatch, provider):
+    import base64
+    import json
+    import time
+    from cryptography.fernet import Fernet
+    from symnote.core import db, llm, source_connections as store, source_providers as remote
+
+    app = create_app()
+    owner = _login_client(app, "owner@example.com", is_owner=True)
+    invite_user("source-reader@example.com")
+    member = _login_client(app, "source-reader@example.com")
+    monkeypatch.setenv("SYMNOTE_PUBLIC_ORIGIN", "https://symnote-test.example")
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_ID", "google-test")
+    monkeypatch.setenv("SYMNOTE_GOOGLE_CLIENT_SECRET", "not-a-real-secret")
+    monkeypatch.setenv("SYMNOTE_SLACK_CLIENT_ID", "slack-test")
+    monkeypatch.setenv("SYMNOTE_SLACK_CLIENT_SECRET", "not-a-real-secret")
+    monkeypatch.setenv("SYMNOTE_INTEGRATION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("LLM_API_KEY", "test-not-real")
+    endpoint = f"/api/integrations/{provider}"
+    now = time.time()
+    calls = []
+    modes = {"bad_scope": False, "bot": False, "rate_limit": False, "ai_fail": False}
+    ai_calls = []
+
+    def transport(url, *, token="", form=None):
+        calls.append((url, token, form))
+        if "oauth2.googleapis.com/token" in url or "oauth.v2.access" in url:
+            grant = {"access_token": "token-" + form.get("code", "owner"), "refresh_token": "test-refresh", "expires_in": 3600}
+            if provider == "gmail":
+                grant["scope"] = remote.GMAIL_SCOPE
+                return grant
+            grant.update(scope="channels:history,channels:read" + (",chat:write" if modes["bad_scope"] else ""), token_type="user")
+            return {"ok": True, "authed_user": grant, **({"bot_user_id": "B123"} if modes["bot"] else {})}
+        if url.endswith("/profile"):
+            return {"emailAddress": f"{token.removeprefix('token-')}@example.com"}
+        if url.endswith("auth.test"):
+            return {"ok": True, "user_id": "U" + token.removeprefix("token-"), "team_id": "T111"}
+        if "conversations.info" in url:
+            cid = parse_qs(urlparse(url).query)["channel"][0]
+            return {"ok": True, "channel": {"id": cid, "name": "test-channel", "is_channel": True, "is_private": cid == "CPRIVATE"}}
+        if "conversations.list" in url:
+            assert "types=public_channel" in url
+            return {"ok": True, "channels": [{"id": "COPEN", "name": "test-channel", "is_channel": True}], "response_metadata": {"next_cursor": ""}}
+        if "conversations.history" in url:
+            if modes["rate_limit"]:
+                raise remote.ProviderError("rate_limited", "利用制限", 60)
+            args = parse_qs(urlparse(url).query)
+            assert args["channel"] == ["COPEN"]
+            assert float(args["oldest"][0]) >= now - 7 * 86400 - 5
+            return {"ok": True, "messages": [
+                {"ts": f"{int(now)-10}.000001", "text": "明日までに見積書を送る", "user": "U2"},
+                {"ts": f"{int(now)-9*86400}.000001", "text": "古い内容"},
+                {"ts": f"{int(now)-9}.000001", "text": "参加しました", "subtype": "channel_join"},
+            ], "has_more": False}
+        if "/messages?" in url:
+            args = parse_qs(urlparse(url).query)
+            assert "category:primary" in args["q"][0] and "in:inbox" in args["q"][0]
+            if modes["rate_limit"]:
+                raise remote.ProviderError("rate_limited", "利用制限", 60)
+            return {"messages": [{"id": "msg1"}, {"id": "old1"}]}
+        if "/messages/" in url:
+            return {"id": "msg1", "internalDate": str(int((now - (9*86400 if "old1" in url else 10)) * 1000)), "labelIds": ["INBOX", "CATEGORY_PERSONAL"], "payload": {
+                "headers": [{"name": "Subject", "value": "見積もり依頼"}], "mimeType": "text/plain",
+                "body": {"data": base64.urlsafe_b64encode("明日までに見積書を送る".encode()).decode()},
+            }}
+        raise AssertionError("許可していない通信: " + url)
+
+    def fake_ai(prompt):
+        ai_calls.append(prompt)
+        if modes["ai_fail"]:
+            raise RuntimeError("secret provider diagnostic")
+        rows = json.loads(prompt.split("BEGIN_UNTRUSTED_DATA_JSON\n")[1].split("\nEND_UNTRUSTED_DATA_JSON")[0])
+        return {"candidates": [{"source_ref": r["source_ref"], "title": "見積書を送る", "excerpt": "明日までに見積書を送る", "confidence": 0.9} for r in rows]}
+
+    monkeypatch.setattr(remote, "request_json", transport)
+    monkeypatch.setattr(llm, "generate_json", fake_ai)
+    assert owner.post(endpoint + "/start", headers={}).status_code == 403
+    assert owner.get(endpoint + "/start").status_code == 404
+    start = owner.post(endpoint + "/start", json={}, headers=CSRF)
+    assert start.status_code == 200, start.text
+    assert start.headers["Cache-Control"] == "no-store"
+    args = parse_qs(urlparse(start.json()["authorization_url"]).query)
+    assert args["redirect_uri"] == [f"https://symnote-test.example{endpoint}/callback"]
+    if provider == "slack":
+        assert "scope" not in args and set(args["user_scope"][0].split(",")) == remote.SLACK_SCOPES
+    else:
+        assert args["scope"] == [remote.GMAIL_SCOPE] and args["code_challenge_method"] == ["S256"]
+    state = args["state"][0]
+    assert member.get(endpoint + "/callback", params={"state": state, "code": "owner"}).status_code == 403
+    assert owner.get(f"/api/integrations/{'slack' if provider == 'gmail' else 'gmail'}/callback", params={"state": state, "code": "owner"}).status_code == 403
+    callback = owner.get(endpoint + "/callback", params={"state": state, "code": "owner"}, follow_redirects=False)
+    assert callback.status_code == 303 and callback.headers["location"].endswith("integration=connected")
+    assert owner.get(endpoint + "/callback", params={"state": state, "code": "owner"}).status_code == 403
+    another_session = _login_client(app, "owner@example.com", is_owner=True)
+    state = parse_qs(urlparse(owner.post(endpoint + "/start", headers=CSRF).json()["authorization_url"]).query)["state"][0]
+    assert another_session.get(endpoint + "/callback", params={"state": state, "code": "owner"}).status_code == 403
+    with user_scope(authenticate_email("owner@example.com")):
+        with db.connection() as conn:
+            encrypted = conn.execute("SELECT credentials FROM source_connections WHERE provider = ?", (provider,)).fetchone()[0]
+        assert "token-owner" not in encrypted and "test-refresh" not in encrypted
+        row, run = store.acquire(provider)
+        assert owner.delete(endpoint, headers=CSRF).status_code == 400
+        with pytest.raises(ValueError):
+            store.acquire(provider)
+        store.finish(provider, row, run)
+        if provider == "slack":
+            with pytest.raises(ValueError):
+                store.unseal("gmail", encrypted)
+    assert member.get("/api/integrations").json()[provider]["connected"] is False
+    assert member.post(endpoint + "/import", json={"consent": True}, headers=CSRF).status_code == 400
+    if provider == "slack":
+        assert owner.post(endpoint + "/import", json={"consent": True}, headers=CSRF).status_code == 400
+        assert owner.get(endpoint + "/channels").json()["channels"][0]["id"] == "COPEN"
+        assert owner.put(endpoint + "/channels", json={"channels": ["CPRIVATE"]}, headers=CSRF).status_code == 403
+        assert owner.put(endpoint + "/channels", json={"channels": ["COPEN"]}, headers=CSRF).status_code == 200
+    assert owner.post(endpoint + "/import", json={"consent": False}, headers=CSRF).status_code == 400
+    with user_scope(authenticate_email("owner@example.com")):
+        row, run = store.acquire(provider)
+        value = store.unseal(provider, row["credentials"])
+        value["expires_at"] = 1
+        store.update_credentials(provider, row, run, value)
+        store.finish(provider, row, run)
+    modes["rate_limit"] = True
+    limited = owner.post(endpoint + "/import", json={"consent": True}, headers=CSRF)
+    assert limited.status_code == 429 and limited.headers["Retry-After"] == "60"
+    assert any(form and form.get("grant_type") == "refresh_token" for _, _, form in calls)
+    modes["rate_limit"] = False
+    modes["ai_fail"] = True
+    assert owner.post(endpoint + "/import", json={"consent": True}, headers=CSRF).status_code == 502
+    modes["ai_fail"] = False
+    result = owner.post(endpoint + "/import", json={"consent": True}, headers=CSRF)
+    assert result.status_code == 200, result.text
+    assert result.json()["fetched_count"] == result.json()["created_count"] == 1
+    assert result.json()["ai_calls"] == 1
+    before = len(ai_calls)
+    again = owner.post(endpoint + "/import", json={"consent": True}, headers=CSRF)
+    assert again.json()["created_count"] == 0 and len(ai_calls) == before
+    assert again.json()["fetched_count"] == again.json()["ai_calls"] == 0
+    assert member.get("/api/inbox").json()["pending_candidates"] == []
+    assert len(owner.get("/api/inbox").json()["pending_candidates"]) == 1
+    assert owner.get("/api/tasks?status=all").json()["tasks"] == []
+    state_status = owner.get("/api/integrations").json()[provider]
+    assert state_status["verified_at"] and state_status["last_fetch_at"] and state_status["last_success_at"]
+    assert "token-owner" not in json.dumps(state_status)
+    if provider == "slack":
+        for mode in ("bad_scope", "bot"):
+            modes[mode] = True
+            state = parse_qs(urlparse(member.post(endpoint + "/start", headers=CSRF).json()["authorization_url"]).query)["state"][0]
+            rejected = member.get(endpoint + "/callback", params={"state": state, "code": "member"}, follow_redirects=False)
+            assert rejected.headers["location"].endswith("integration=failed")
+            assert member.get("/api/integrations").json()[provider]["connected"] is False
+            modes[mode] = False
+    member_state = parse_qs(urlparse(member.post(endpoint + "/start", headers=CSRF).json()["authorization_url"]).query)["state"][0]
+    assert member.get(endpoint + "/callback", params={"state": member_state, "code": "member"}, follow_redirects=False).headers["location"].endswith("integration=connected")
+    with user_scope(authenticate_email("source-reader@example.com")):
+        with pytest.raises(ValueError):
+            store.unseal(provider, encrypted)
+    assert owner.delete(endpoint, headers=CSRF).status_code == 200
+    assert owner.get("/api/integrations").json()[provider]["connected"] is False
+    assert member.get("/api/integrations").json()[provider]["connected"] is True
+    assert not any("chat.post" in url or "conversations.join" in url or "invite" in url for url, _, _ in calls)
+
+
+def test_source_transport_rejects_writes_and_untrusted_redirects(api_env):
+    import urllib.request
+    from symnote.core import source_providers as remote
+    with pytest.raises(ValueError):
+        remote.slack_call("chat.postMessage", "not-a-token", channel="COPEN", text="hello")
+    with pytest.raises(ValueError):
+        remote.slack_call("conversations.join", "not-a-token", channel="COPEN")
+    with pytest.raises(ValueError):
+        remote.request_json("https://example.com/", token="not-a-token")
+    with pytest.raises(ValueError):
+        remote.request_json("https://gmail.googleapis.com/gmail/v1/users/me/messages/msg1", form={"labelIds": []})
+    with pytest.raises(remote.ProviderError):
+        remote.NoRedirect().redirect_request(urllib.request.Request("https://slack.com/api/auth.test"), None, 302, "", {}, "https://example.com/")
+
+
+def test_expired_source_run_stops_new_ai_and_provider_requests(api_env, monkeypatch):
+    import time
+    from cryptography.fernet import Fernet
+    from symnote.api import integrations
+    from symnote.core import db, llm, source_connections as store, source_providers as remote
+    from symnote.core.task_extraction import ImportItem
+    monkeypatch.setenv("SYMNOTE_INTEGRATION_KEY", Fernet.generate_key().decode())
+    db.init_db()
+    credentials = {"access_token": "test-only-token", "scope": remote.GMAIL_SCOPE, "expires_at": 0}
+    store.save_connection("gmail", credentials, "reader@example.com", "")
+    monkeypatch.setattr(remote, "gmail_messages", lambda *_: remote.FetchResult([
+        ImportItem(f"ref-{n}", "a" * 12000, title="用事") for n in range(3)
+    ]))
+    calls = []
+    clock = time.time()
+    def invalid_response(_prompt):
+        calls.append(1)
+        monkeypatch.setattr(store.time, "time", lambda: clock + 901)
+        store.disconnect("gmail")
+        raise llm.LLMResponseError("invalid response")
+    monkeypatch.setattr(llm, "generate_json", invalid_response)
+    result, status = integrations.import_source("gmail")
+    assert status == 502 and result["created_count"] == 0
+    assert len(calls) == 1
+    assert store.load("gmail") is None
+    with remote.authorized_run(lambda: store.renew("gmail", {"revision": "old"}, "old-run")):
+        with pytest.raises(ValueError):
+            remote.request_json("https://gmail.googleapis.com/gmail/v1/users/me/profile", token="test-only-token")
+
+
+def test_cancelled_inflight_oauth_cannot_recreate_a_connection(api_env, monkeypatch):
+    from cryptography.fernet import Fernet
+    from symnote.core import db, source_connections as store
+    monkeypatch.setenv("SYMNOTE_INTEGRATION_KEY", Fernet.generate_key().decode())
+    db.init_db()
+    state = store.save_state("gmail", "session-1", {"verifier": "test"})
+    payload = store.consume_state("gmail", "session-1", state)
+    store.disconnect("gmail")
+    with pytest.raises(ValueError):
+        store.save_connection("gmail", {"access_token": "test"}, "test@example.com", "", state_hash=payload["state_hash"])
+    assert store.load("gmail") is None
+
+
+@pytest.mark.parametrize("provider", ["gmail", "slack"])
+def test_source_paging_retries_failed_ai_without_skipping_a_page(api_env, monkeypatch, provider):
+    import base64
+    import json
+    import time
+    from cryptography.fernet import Fernet
+    from symnote.api import integrations
+    from symnote.core import db, llm, source_connections as store, source_providers as remote
+    monkeypatch.setenv("SYMNOTE_INTEGRATION_KEY", Fernet.generate_key().decode())
+    db.init_db()
+    store.save_connection(provider, {"access_token": "test", "expires_at": 0}, "U1", "T1")
+    if provider == "slack":
+        row, run = store.acquire(provider)
+        store.set_channels(row, run, ["COPEN"])
+        store.finish(provider, row, run)
+    requested = []
+    now = int(time.time())
+    monkeypatch.setattr(remote, "MAX_MESSAGES", 1)
+    fail = [True]
+    def transport(url, *, token="", form=None):
+        args = parse_qs(urlparse(url).query)
+        if "conversations.info" in url:
+            return {"ok": True, "channel": {"id": "COPEN", "name": "channel", "is_channel": True}}
+        if "conversations.history" in url:
+            cursor = "page2" if float(args["latest"][0]) < now - 5 else ""
+            requested.append(cursor)
+            return {"ok": True, "messages": [{"ts": f"{now - (20 if cursor else 10)}.000001", "text": "見積書を送る", "user": "U1"}], "has_more": not bool(cursor), "response_metadata": {"next_cursor": "page2" if not cursor else ""}}
+        if "/messages?" in url:
+            cursor = args.get("pageToken", [""])[0]
+            requested.append(cursor)
+            return {"messages": [{"id": "second" if cursor else "first"}], **({"nextPageToken": "page2"} if not cursor else {})}
+        if "/messages/" in url:
+            return {"internalDate": str((now-10)*1000), "labelIds": ["INBOX", "CATEGORY_PERSONAL"], "payload": {"mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode("見積書を送る".encode()).decode()}}}
+        raise AssertionError(url)
+    def fake_ai(prompt):
+        if fail[0]:
+            raise llm.LLMUnavailableError("test failure")
+        rows = json.loads(prompt.split("BEGIN_UNTRUSTED_DATA_JSON\n")[1].split("\nEND_UNTRUSTED_DATA_JSON")[0])
+        return {"candidates": [{"source_ref": row["source_ref"], "title": "見積書を送る", "confidence": 0.9, "excerpt": "見積書を送る"} for row in rows]}
+    monkeypatch.setattr(remote, "request_json", transport)
+    monkeypatch.setattr(llm, "generate_json", fake_ai)
+    assert integrations.import_source(provider)[1] == 502
+    assert json.loads(store.load(provider)["checkpoint"]) == {}
+    fail[0] = False
+    body, status = integrations.import_source(provider)
+    assert status == 200 and body["limited"] and body["created_count"] == 1
+    checkpoint = json.loads(store.load(provider)["checkpoint"])
+    assert (checkpoint["scans"]["COPEN"]["latest"] if provider == "slack" else checkpoint["cursor"]) == (f"{now - 10}.000001" if provider == "slack" else "page2")
+    before = len(requested)
+    body, status = integrations.import_source(provider)
+    assert requested[before] == "page2"
+    assert status == 200 and not body["limited"] and body["created_count"] == 1

@@ -14,7 +14,10 @@ from typing import Any
 
 from symnote.core import db, postgres
 
-_LOCAL_ONLY_TABLES = {"oauth_clients", "oauth_tokens", "llm_usage"}
+_LOCAL_ONLY_TABLES = {
+    "oauth_clients", "oauth_tokens", "llm_usage",
+    "source_connections", "source_oauth_states",
+}
 
 
 def _identifier(name: str) -> str:

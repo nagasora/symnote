@@ -20,3 +20,6 @@ def _isolated_ai_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("LLM_API_KEY", "")
     monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("SYMNOTE_INTEGRATION_KEY", "")
+    monkeypatch.setenv("SYMNOTE_SLACK_CLIENT_ID", "")
+    monkeypatch.setenv("SYMNOTE_SLACK_CLIENT_SECRET", "")
