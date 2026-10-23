@@ -305,7 +305,7 @@ def test_v17_to_v18_bonus_migration_preserves_items(monkeypatch, tmp_path) -> No
 
     assert fetch_item(item_id) is not None
     with sqlite3.connect(database) as check:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 19
+        assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 20
         assert check.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='quest_bonus_log'"
         ).fetchone() == ("quest_bonus_log",)
@@ -461,7 +461,7 @@ def test_v15_recurrence_migration_preserves_rules(monkeypatch, tmp_path) -> None
     init_db()
     init_db()
     with sqlite3.connect(database) as check:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 19
+        assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 20
         assert (
             check.execute(
                 "SELECT id, frequency, interval_days, end_date, active, created_at FROM task_recurrence_rules ORDER BY id"
@@ -481,20 +481,27 @@ def test_v15_recurrence_migration_preserves_rules(monkeypatch, tmp_path) -> None
     assert complete_task(second) is None
 
 
-def test_v18_source_migration_preserves_data_and_is_repeatable(monkeypatch, tmp_path):
+@pytest.mark.parametrize("legacy_version", [18, 19])
+def test_v18_source_migration_preserves_data_and_is_repeatable(legacy_version, monkeypatch, tmp_path):
     database = tmp_path / "v18-sources.db"
     monkeypatch.setenv("DB_PATH", str(database))
     init_db()
     task_id = insert_task("連携の移行前の用事")
     tables = ("source_connections", "source_oauth_states", "source_processed")
     with sqlite3.connect(database) as legacy:
-        for table in tables:
-            legacy.execute(f"DROP TABLE {table}")
-        legacy.execute("PRAGMA user_version = 18")
+        if legacy_version == 18:
+            for table in tables:
+                legacy.execute(f"DROP TABLE {table}")
+        else:
+            legacy.execute("ALTER TABLE source_oauth_states DROP COLUMN consumed")
+            legacy.execute("ALTER TABLE source_connections DROP COLUMN checkpoint")
+        legacy.execute(f"PRAGMA user_version = {legacy_version}")
     init_db()
     init_db()
     assert fetch_item(task_id) is not None
     with sqlite3.connect(database) as check:
-        assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 19
+        assert check.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 20
+        assert check.execute("SELECT consumed FROM source_oauth_states").fetchall() == []
+        assert check.execute("SELECT checkpoint FROM source_connections").fetchall() == []
         for table in tables:
             assert check.execute("SELECT name FROM sqlite_master WHERE name = ?", (table,)).fetchone()

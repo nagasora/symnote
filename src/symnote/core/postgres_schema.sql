@@ -1,4 +1,4 @@
--- SymNote PostgreSQL data schema, snapshot version 18.
+-- SymNote PostgreSQL data schema, snapshot version 20.
 -- All date/time values remain TEXT to preserve the local SQLite data contract.
 
 CREATE TABLE IF NOT EXISTS task_recurrence_rules (

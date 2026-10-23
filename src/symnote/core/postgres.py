@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-POSTGRES_SCHEMA_VERSION = 19
+POSTGRES_SCHEMA_VERSION = 20
 DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
 OWNER_SCHEMA = "symnote_owner"
 SYSTEM_SCHEMA = "symnote_system"
@@ -49,6 +49,10 @@ _schema_scope: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 _POSTGRES_MIGRATIONS = {
+    20: """
+ALTER TABLE source_oauth_states ADD COLUMN IF NOT EXISTS consumed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE source_connections ADD COLUMN IF NOT EXISTS checkpoint TEXT NOT NULL DEFAULT '{}';
+""",
     19: """
 CREATE TABLE IF NOT EXISTS source_connections (
   provider TEXT PRIMARY KEY,

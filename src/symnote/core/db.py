@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 ItemRow = Dict[str, Any]
 SQLITE_BUSY_TIMEOUT_MS = 5_000
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 
 @contextmanager
@@ -504,7 +504,7 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
               account TEXT NOT NULL,
               workspace TEXT NOT NULL DEFAULT '',
               channels TEXT NOT NULL DEFAULT '[]',
-  checkpoint TEXT NOT NULL DEFAULT '{}',
+              checkpoint TEXT NOT NULL DEFAULT '{}',
               verified_at DOUBLE PRECISION NOT NULL,
               last_fetch_at DOUBLE PRECISION,
               last_success_at DOUBLE PRECISION,
@@ -536,6 +536,16 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
             """
         )
         conn.execute("PRAGMA user_version = 19")
+        current = 19
+    if current < 20:
+        for table, column, definition in (
+            ("source_oauth_states", "consumed", "INTEGER NOT NULL DEFAULT 0"),
+            ("source_connections", "checkpoint", "TEXT NOT NULL DEFAULT '{}'"),
+        ):
+            columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        conn.execute("PRAGMA user_version = 20")
 
 
 def init_db() -> None:
