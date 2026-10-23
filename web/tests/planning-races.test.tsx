@@ -228,9 +228,9 @@ it("requires saved Slack channel scope and consent, and never starts an import o
   expect(send).toBeDisabled();
   fireEvent.click(screen.getByRole("checkbox", { name: /この範囲/ }));
   expect(send).not.toBeDisabled();
-  apiFetchMock.mockResolvedValueOnce({ message: "候補を1件追加しました" });
+  apiFetchMock.mockResolvedValueOnce({ message: "候補を1件追加しました", fetched_count: 2, ai_calls: 1 });
   fireEvent.click(send);
-  await screen.findByText(/候補を1件追加しました/);
+  await screen.findByText(/今回の未処理情報：2件。AI処理：1回。候補を1件追加しました/);
   expect(apiFetchMock).toHaveBeenLastCalledWith("/api/integrations/slack/import", { body: { consent: true } });
   expect(screen.getByRole("checkbox", { name: /この範囲/ })).not.toBeChecked();
 });

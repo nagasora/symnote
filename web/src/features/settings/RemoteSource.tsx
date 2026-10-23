@@ -70,8 +70,8 @@ export function RemoteSource({ provider, status, aiConfigured, reload }: {
       <Button variant="sun" disabled={busy || !consent || !aiConfigured || !status.available || (provider === "slack" && (dirty || !status.channels?.length))}
         onClick={() => void action(async () => {
           try {
-            const result = await apiFetch<{ message: string }>(`/api/integrations/${provider}/import`, { body: { consent } });
-            setMessage(result.message); setConsent(false);
+            const result = await apiFetch<{ message: string; fetched_count: number; ai_calls: number }>(`/api/integrations/${provider}/import`, { body: { consent } });
+            setMessage(`今回の未処理情報：${result.fetched_count}件。AI処理：${result.ai_calls}回。${result.message}`); setConsent(false);
           } finally { await reload(); }
         })}>{busy ? "処理中…" : `${name}から依頼の候補を作る`}</Button>
       <Button disabled={busy} onClick={() => setRemoving(!removing)}>接続を解除する</Button>

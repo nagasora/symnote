@@ -292,6 +292,7 @@ def import_source(provider: str):
             "created_count": result.created_count,
             "duplicate_count": result.duplicate_count,
             "fetched_count": len(fetched.items),
+            "ai_calls": result.ai_calls,
             "limited": fetched.limited,
             "partial": failed or fetched.limited,
             "message": message,

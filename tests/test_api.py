@@ -1312,9 +1312,11 @@ def test_direct_source_oauth_is_read_only_scoped_and_retryable(api_env, monkeypa
     result = owner.post(endpoint + "/import", json={"consent": True}, headers=CSRF)
     assert result.status_code == 200, result.text
     assert result.json()["fetched_count"] == result.json()["created_count"] == 1
+    assert result.json()["ai_calls"] == 1
     before = len(ai_calls)
     again = owner.post(endpoint + "/import", json={"consent": True}, headers=CSRF)
     assert again.json()["created_count"] == 0 and len(ai_calls) == before
+    assert again.json()["fetched_count"] == again.json()["ai_calls"] == 0
     assert member.get("/api/inbox").json()["pending_candidates"] == []
     assert len(owner.get("/api/inbox").json()["pending_candidates"]) == 1
     assert owner.get("/api/tasks?status=all").json()["tasks"] == []
